@@ -25,7 +25,7 @@
 **With this tool:**
 ```bash
 hermes-team init --team-name MyTeam --roles pm,fe,be,qa,ui
-hermes-team configure --prefix MyTeam --platform feishu
+hermes-team configure --prefix MyTeam
 hermes-team start --prefix MyTeam
 hermes-team collect-ids --prefix MyTeam
 hermes-team verify --prefix MyTeam
@@ -103,12 +103,14 @@ Coordinator:  "@You Feature complete ✅"
 
 ## 🌐 Supported Platforms
 
+> ⚠️ **Automation currently covers Feishu only**: `configure` writes `FEISHU_*` keys and `start` validates Feishu credentials. The other platforms below are supported by Hermes itself but require **manual** `.env` editing per profile, and cannot pass `hermes-team start` credential validation.
+
 | Platform | Status | Config Fields |
 |----------|--------|--------------|
-| **Feishu / Lark** | ✅ Full support | `FEISHU_APP_ID`, `FEISHU_APP_SECRET` |
-| **Telegram** | ✅ Supported | `TELEGRAM_BOT_TOKEN` |
-| **Discord** | ✅ Supported | `DISCORD_BOT_TOKEN`, `DISCORD_APP_ID` |
-| **Slack** | ✅ Supported | `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` |
+| **Feishu / Lark** | ✅ Full support (tool-automated) | `FEISHU_APP_ID`, `FEISHU_APP_SECRET` |
+| **Telegram** | ⚠️ Supported by Hermes, manual setup | `TELEGRAM_BOT_TOKEN` |
+| **Discord** | ⚠️ Supported by Hermes, manual setup | `DISCORD_BOT_TOKEN`, `DISCORD_APP_ID` |
+| **Slack** | ⚠️ Supported by Hermes, manual setup | `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` |
 
 ---
 
@@ -126,8 +128,8 @@ hermes --version
 
 **Prerequisites:**
 - Python 3.10+
-- [Hermes Agent](https://github.com/NousResearch/hermes-agent) installed
-- A messaging platform account with bot creation permissions
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent) **>= 0.19** (multiplexed gateway: one host gateway serves all profiles; run `hermes-team doctor` to check)
+- A messaging platform account — each agent needs its **own** Feishu app/bot
 
 ---
 
@@ -157,14 +159,18 @@ hermes-team init --team-name MyTeam --roles pm,fe,be,qa,ui
 ### Step 3: Configure Credentials
 
 ```bash
-hermes-team configure --prefix MyTeam --platform feishu
+hermes-team configure --prefix MyTeam
 ```
+
+⚠️ **Each agent must use its own Feishu app** — one app_id can only serve one Hermes instance; the tool enforces uniqueness across profiles. Shared settings (domain, policies) are asked once.
 
 ### Step 4: Start Gateways
 
 ```bash
 hermes-team start --prefix MyTeam
 ```
+
+Starts the host multiplex gateway (one process serving all profiles, the default since Hermes 0.19). Credentials are validated first in both modes: every profile needs its own `FEISHU_APP_ID`/`FEISHU_APP_SECRET`, and App IDs must be unique across **all host-served profiles under `profiles/`** (other teams included; parked/standalone profiles skipped) plus the default profile's `~/.hermes/.env`. Use `--standalone` for the legacy one-gateway-per-profile mode.
 
 ### Step 5: Collect IDs
 
@@ -186,7 +192,7 @@ hermes-team verify --prefix MyTeam
 |---------|-------------|
 | `hermes-team init` | Create profiles + generate SOUL.md templates |
 | `hermes-team configure` | Interactively configure .env for each profile |
-| `hermes-team start` | Batch install and start gateways |
+| `hermes-team start` | Start the host multiplex gateway serving all profiles |
 | `hermes-team collect-ids` | Auto-extract platform IDs from gateway logs |
 | `hermes-team verify` | Verify all configurations are correct |
 | `hermes-team status` | Show team status overview |

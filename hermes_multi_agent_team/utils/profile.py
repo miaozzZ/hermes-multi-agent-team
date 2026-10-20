@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -29,11 +30,39 @@ def profile_exists(name: str) -> bool:
 
 
 def read_env(name: str) -> dict[str, str | None]:
-    """Read .env from a profile directory. Returns dict of key→value (None if unset)."""
+    """Read .env from a profile directory. Returns dict of key→value (None if unset).
+
+    A .env that cannot be read (permissions, broken encoding) yields {} instead
+    of raising — one unreadable profile must not crash a whole-team command.
+    """
     env_path = get_profile_dir(name) / ".env"
     if not env_path.exists():
         return {}
-    return dotenv_values(env_path)
+    try:
+        return dotenv_values(env_path)
+    except (OSError, UnicodeError):
+        return {}
+
+
+# The default profile's .env lives in the Hermes home itself (outside profiles/),
+# but the host multiplex gateway serves it like any team profile — its App ID
+# participates in uniqueness checks.
+DEFAULT_PROFILE_ENV_LABEL = "~/.hermes/.env (default profile)"
+
+
+def read_default_env() -> dict[str, str | None]:
+    """Read the default profile's .env from the Hermes home. Empty dict if absent.
+
+    Same tolerance as read_env: an unreadable file (permissions, broken
+    encoding) yields {} instead of raising — start/verify scan it on every run.
+    """
+    env_path = get_hermes_home() / ".env"
+    if not env_path.exists():
+        return {}
+    try:
+        return dotenv_values(env_path)
+    except (OSError, UnicodeError):
+        return {}
 
 
 def write_env(name: str, env_vars: dict[str, str]) -> None:
@@ -46,11 +75,18 @@ def write_env(name: str, env_vars: dict[str, str]) -> None:
 
 
 def read_soul(name: str) -> str:
-    """Read SOUL.md from a profile directory."""
+    """Read SOUL.md from a profile directory.
+
+    Same tolerance as read_env: an unreadable file (permissions, broken
+    encoding) yields "" instead of raising.
+    """
     soul_path = get_profile_dir(name) / "SOUL.md"
     if not soul_path.exists():
         return ""
-    return soul_path.read_text(encoding="utf-8")
+    try:
+        return soul_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return ""
 
 
 def write_soul(name: str, content: str) -> None:
@@ -59,11 +95,146 @@ def write_soul(name: str, content: str) -> None:
     soul_path.write_text(content, encoding="utf-8")
 
 
+# Hermes' _PROFILE_IDENTITY_MARKERS: a directory under profiles/ without any of
+# these is a runtime side-effect (cron heartbeat, log rotation) or a ghost shell.
+_PROFILE_IDENTITY_MARKERS = (
+    "config.yaml",
+    ".env",
+    "SOUL.md",
+    "profile.yaml",
+    "auth.json",
+    "state.db",
+)
+
+
+def _servable_profile_entry(profiles_dir: Path, entry: Path) -> bool:
+    """Hermes' named-profile gates (_iter_named_profile_dirs): not ``default``,
+    not tombstoned (``profiles/.deleted/<name>`` exists), and carries an
+    identity marker — ghost shells "must never be listed, served"."""
+    if entry.name == "default":
+        return False
+    if (profiles_dir / ".deleted" / entry.name).exists():
+        return False
+    return any(
+        (entry / marker).is_file() or (entry / marker).is_symlink()
+        for marker in _PROFILE_IDENTITY_MARKERS
+    )
+
+
 def list_team_profiles(prefix: str) -> list[str]:
-    """List all profile names matching the given prefix."""
+    """List servable profile names matching the given prefix.
+
+    Same gates as list_all_profile_names: ghost directories (runtime
+    side-effects without an identity marker) and tombstoned profiles are not
+    team profiles — the host never serves them, and treating them as missing
+    credentials would fail start/verify spuriously.
+    """
     profiles_dir = get_profiles_dir()
     if not profiles_dir.is_dir():
         return []
     return sorted(
-        p.name for p in profiles_dir.iterdir() if p.is_dir() and p.name.startswith(prefix)
+        p.name
+        for p in profiles_dir.iterdir()
+        if p.is_dir() and p.name.startswith(prefix) and _servable_profile_entry(profiles_dir, p)
     )
+
+
+def list_all_profile_names() -> list[str]:
+    """List every servable named profile under profiles/ — other teams included.
+
+    The host multiplex gateway serves ALL of these (Hermes' profiles_to_serve).
+    """
+    profiles_dir = get_profiles_dir()
+    if not profiles_dir.is_dir():
+        return []
+    return sorted(
+        p.name
+        for p in profiles_dir.iterdir()
+        if p.is_dir() and _servable_profile_entry(profiles_dir, p)
+    )
+
+
+def profile_served_by_host(name: str) -> bool:
+    """Whether the host multiplex gateway serves this named profile.
+
+    Mirrors Hermes' profiles_to_serve: a profile is skipped when it carries a
+    ``gateway.parked`` marker (``hermes -p <name> gateway stop``) or opted out
+    via ``gateway.standalone: true`` in its config.yaml.
+    """
+    profile_dir = get_profile_dir(name)
+    if (profile_dir / "gateway.parked").exists():
+        return False
+    return not _config_gateway_standalone(profile_dir)
+
+
+def _config_gateway_standalone(profile_dir: Path) -> bool:
+    """Best-effort read of ``gateway.standalone`` from a profile's config.yaml.
+
+    Line-level scan (no YAML dependency): locates the top-level ``gateway:``
+    section, lets its FIRST indented key define the direct-child indent (so 2- or
+    4-space YAML both work, but a deeper ``gateway.<sub>.standalone`` is ignored),
+    and also understands an inline ``gateway: {standalone: true}``. Anything
+    unreadable or ambiguous counts as NOT standalone: for credential-uniqueness
+    checks we would rather over-report a clash than miss one.
+    """
+    path = profile_dir / "config.yaml"
+    if not path.exists():
+        return False
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return False
+
+    child_indent: int | None = None
+    in_gateway = False
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        if not line or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent == 0:
+            key, sep, rest = line.partition(":")
+            if not sep:
+                in_gateway = False
+                continue
+            rest = rest.strip()
+            in_gateway = key.strip() == "gateway"
+            if in_gateway and rest.startswith("{"):
+                return _flow_map_has_standalone_true(rest)
+            child_indent = None
+            continue
+        if not in_gateway:
+            continue
+        if child_indent is None:
+            child_indent = indent  # first nested key defines the direct-child indent
+        if indent == child_indent:
+            key, sep, value = line.strip().partition(":")
+            if sep and key.strip() == "standalone":
+                return _scalar_token(value) in _TRUTHY_TOKENS
+    return False
+
+
+def _flow_map_has_standalone_true(flow_map: str) -> bool:
+    """Parse ``{standalone: true, ...}`` (inline flow mapping) — best effort."""
+    match = re.search(r"\bstandalone\s*:\s*([^,}]+)", flow_map)
+    if not match:
+        return False
+    return _scalar_token(match.group(1)) in _TRUTHY_TOKENS
+
+
+_TRUTHY_TOKENS = ("true", "yes", "on", "1")
+
+
+def _scalar_token(value: str) -> str:
+    """First scalar of a YAML value: strip an unquoted inline comment and quotes."""
+    value = value.strip()
+    if value[:1] in ('"', "'"):
+        # A '#' inside quotes is data, not a comment. An unterminated quote is
+        # broken YAML: return an empty (non-truthy) token, mirroring Hermes'
+        # YAMLError → not-standalone → served-by-host fallback.
+        quote = value[0]
+        end = value.find(quote, 1)
+        if end == -1:
+            return ""
+        return value[1:end].strip().lower()
+    return value.split("#", 1)[0].strip().lower()

@@ -7,6 +7,7 @@ from importlib import resources
 from pathlib import Path
 
 import click
+import jinja2
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from hermes_multi_agent_team.utils.gateway import find_hermes_bin
@@ -81,6 +82,7 @@ def _run_hermes(args: list[str], dry_run: bool = False) -> subprocess.CompletedP
             capture_output=True,
             text=True,
             timeout=120,
+            check=False,
         )
         if result.returncode != 0:
             click.echo(f"  ⚠️  Command returned {result.returncode}")
@@ -193,7 +195,7 @@ def init_team(
                 soul_path = profile_dir / "SOUL.md"
                 soul_path.write_text(soul_content, encoding="utf-8")
                 click.echo(f"  ✅ Generated SOUL.md ({len(soul_content)} bytes)")
-            except Exception as e:
+            except (OSError, jinja2.TemplateError) as e:
                 click.echo(f"  ❌ Failed to render template: {e}")
                 fail_count += 1
                 continue

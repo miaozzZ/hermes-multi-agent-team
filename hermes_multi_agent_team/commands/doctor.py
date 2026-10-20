@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import shutil
 import sys
+from pathlib import Path
 
 import click
 
@@ -19,15 +19,45 @@ def _check_python_version() -> tuple[bool, str, str]:
 
 
 def _check_hermes_installed() -> tuple[bool, str, str]:
-    """Check if Hermes Agent CLI is available."""
-    hermes_path = shutil.which("hermes")
-    if hermes_path:
+    """Check if Hermes Agent CLI is available.
+
+    Uses the same lookup as the version check (find_hermes_bin), so a Hermes
+    installed only in ~/.hermes/hermes-agent/venv is reported consistently:
+    either both checks pass or both fail.
+    """
+    from hermes_multi_agent_team.utils.gateway import find_hermes_bin
+
+    hermes_path = find_hermes_bin()
+    if Path(hermes_path).exists():
         return True, hermes_path, ""
     return (
         False,
         "not found",
         "Install: curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
     )
+
+
+# Hermes 0.19 made the multiplexed gateway (one gateway process serving all
+# profiles) the default; hermes-team start relies on it.
+MIN_HERMES_VERSION = (0, 19, 0)
+
+
+def _check_hermes_version() -> tuple[bool, str, str]:
+    """Check Hermes CLI is >= 0.19 (multiplexed gateway)."""
+    from hermes_multi_agent_team.utils.gateway import get_hermes_version
+
+    version = get_hermes_version()
+    if version is None:
+        return False, "unknown", "Could not determine Hermes version (`hermes --version` failed)"
+    version_str = ".".join(str(n) for n in version)
+    if version < MIN_HERMES_VERSION:
+        min_str = ".".join(str(n) for n in MIN_HERMES_VERSION)
+        return (
+            False,
+            version_str,
+            f"Hermes >= {min_str} required (multiplexed gateway); run `hermes update`",
+        )
+    return True, version_str, ""
 
 
 def _check_click() -> tuple[bool, str, str]:
@@ -75,6 +105,7 @@ def _check_hermes_profiles_dir() -> tuple[bool, str, str]:
 ALL_CHECKS = [
     ("Python ≥3.10", _check_python_version),
     ("Hermes CLI", _check_hermes_installed),
+    ("Hermes version", _check_hermes_version),
     ("click", _check_click),
     ("python-dotenv", _check_dotenv),
     ("Jinja2", _check_jinja2),
@@ -121,6 +152,8 @@ def run_doctor() -> None:
             if not ok and fix:
                 click.echo(f"   ❌ {label}: {fix}")
         click.echo()
+        # Non-zero exit so scripts and CI can detect a failing environment.
+        sys.exit(1)
 
     click.echo("💡 Quick commands:")
     click.echo("   hermes-team init --team-name my-team   # Create a team")

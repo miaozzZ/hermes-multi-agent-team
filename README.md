@@ -68,12 +68,15 @@ hermes-team verify --prefix MyTeam
 
 ### 🌐 支持的平台
 
+> ⚠️ **本工具的自动化目前仅覆盖飞书**：`configure` 只写入 `FEISHU_*` 配置项，`start` 也只校验飞书凭证。
+> 下表中的其他平台由 Hermes 本身支持，但需要**手动**编辑各 profile 的 `.env`，且无法通过 `hermes-team start` 的凭证校验。
+
 | 平台 | 状态 | 配置项 |
 |------|------|--------|
-| **飞书 / Lark** | ✅ 完整支持 | `FEISHU_APP_ID`, `FEISHU_APP_SECRET` |
-| **Telegram** | ✅ 支持 | `TELEGRAM_BOT_TOKEN` |
-| **Discord** | ✅ 支持 | `DISCORD_BOT_TOKEN`, `DISCORD_APP_ID` |
-| **Slack** | ✅ 支持 | `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` |
+| **飞书 / Lark** | ✅ 完整支持（工具自动化） | `FEISHU_APP_ID`, `FEISHU_APP_SECRET` |
+| **Telegram** | ⚠️ Hermes 支持，需手动配置 | `TELEGRAM_BOT_TOKEN` |
+| **Discord** | ⚠️ Hermes 支持，需手动配置 | `DISCORD_BOT_TOKEN`, `DISCORD_APP_ID` |
+| **Slack** | ⚠️ Hermes 支持，需手动配置 | `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` |
 
 ### 🔄 Hub-and-Spoke 协作模式
 
@@ -136,8 +139,8 @@ hermes --version
 
 **前置要求：**
 - Python 3.10+
-- [Hermes Agent](https://github.com/NousResearch/hermes-agent) 已安装
-- 消息平台账号（飞书/Telegram/Discord/Slack，每个 Agent 需要一个独立的 Bot）
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent) **>= 0.19**（multiplexed gateway：单 host 网关服务所有 profile；运行 `hermes-team doctor` 检查版本）
+- 消息平台账号（每个 Agent 需要一个**独立**的飞书 App/Bot）
 
 ---
 
@@ -174,13 +177,10 @@ hermes-team init --team-name MyTeam --roles pm,fe,be,qa,ui
 ### Step 3: 配置平台凭证
 
 ```bash
-hermes-team configure --prefix MyTeam --platform feishu
-# 或 Telegram: hermes-team configure --prefix MyTeam --platform telegram
-# 或 Discord:  hermes-team configure --prefix MyTeam --platform discord
-# 或 Slack:    hermes-team configure --prefix MyTeam --platform slack
+hermes-team configure --prefix MyTeam
 ```
 
-交互式输入每个角色的平台凭证。
+⚠️ **每个 Agent 必须使用独立的飞书 App**（一个 app_id 只能服务一个 Hermes 实例，共享凭证会被网关拒绝/park）。工具会为每个角色单独询问 App ID/Secret 并强制查重；域名、群策略等公共设置只需回答一次（`FEISHU_ALLOWED_USERS` 因 open_id per-app 隔离而按角色单独询问）。
 
 ### Step 4: 启动 Gateway
 
@@ -188,7 +188,7 @@ hermes-team configure --prefix MyTeam --platform feishu
 hermes-team start --prefix MyTeam
 ```
 
-批量启动所有 Agent 的飞书 Gateway。
+启动 host multiplex 网关（单进程服务所有 profile，Hermes >= 0.19 默认行为）。启动前会校验每个 profile 的凭证齐全且 App ID 不重复——查重覆盖 `profiles/` 下所有被 host 服务的 profile（含其他 team）、默认 profile 的 `~/.hermes/.env` 也参与。如需旧版「每 profile 一个网关进程」模式，用 `--standalone`（凭证校验同样生效；Hermes >= 0.19 下还需在 profile 的 config.yaml 里设置 `gateway.standalone: true`）。
 
 ### Step 5: 收集 open_id
 
@@ -250,20 +250,35 @@ hermes-team configure [OPTIONS]
 
 Options:
   --prefix TEXT      Profile 名称前缀  [required]
-  --platform TEXT    平台类型 (feishu/telegram/discord/slack)  [required]
   --dry-run          显示将要写入的内容，不实际写入
 ```
 
+行为说明：
+- 每个角色单独输入 **Feishu App ID / App Secret**，工具强制查重（一个 app_id 只能服务一个 Hermes 实例）
+- 域名、连接模式、群策略（`FEISHU_GROUP_POLICY`）、允许的机器人等公共设置默认只询问一次、应用到全部 profile
+- `FEISHU_ALLOWED_USERS` 例外：open_id 是 **per-app 隔离**的，无法跨 profile 共用，因此对每个角色单独询问（若群策略选了 `allowlist` 而名单留空，该 bot 会拒收所有群消息，工具会给出警告）
+- 写入 `.env` 时会**保留**工具不管理的键（如模型 API Key），并清理已废弃的变量（`FEISHU_DM_POLICY`；`FEISHU_ALLOW_ALL_USERS` 仍被 Hermes 0.22.x 读取，会原样保留）
+
 ### `hermes-team start`
 
-批量安装并启动所有 Gateway。
+启动服务所有 profile 的 host multiplex 网关。
 
 ```bash
 hermes-team start [OPTIONS]
 
 Options:
   --prefix TEXT    Profile 名称前缀  [required]
+  --standalone     旧模式：为每个 profile 单独启动网关（Hermes >= 0.19 默认拒绝，需在 profile config.yaml 设置 gateway.standalone: true）
   --dry-run        显示将要执行的命令，不实际执行
+```
+
+启动前会校验：每个 profile 的 `FEISHU_APP_ID`/`FEISHU_APP_SECRET` 齐全，且 App ID 不重复。查重范围为 **`profiles/` 下所有被 host 网关服务的 profile**（含其他 team 的 profile；已 park 或 `gateway.standalone` 的 profile 除外）以及默认 profile 的 `~/.hermes/.env`——multiplex 与 `--standalone` 模式均校验。校验失败时退出码为非 0，可直接用于脚本/CI 判断。
+
+**multiplex 模式下的日常操作：**
+```bash
+hermes gateway restart              # 修改 .env 后立即生效（平时 ~30s 自动重扫）
+hermes -p MyTeam-pm gateway stop    # 单独停用一个角色（park），不影响其他人
+hermes gateway status               # 查看 host 网关状态
 ```
 
 ### `hermes-team collect-ids`
@@ -296,10 +311,14 @@ Options:
 检查项：
 - ✅ Profile 目录存在
 - ✅ .env 包含必需字段
+- ✅ 群策略合理性（`allowlist` 且名单为空会拒收所有群消息）
 - ✅ SOUL.md 存在且有 @mention 格式
 - ✅ open_id 已填充（非占位符）
-- ✅ Gateway 运行中
+- ✅ Gateway 运行中（multiplex 模式下由 host 网关服务的 profile 也能正确识别）
 - ✅ 飞书连接正常
+- ✅ 团队级：App ID 不重复（一个 app_id 只能服务一个 Hermes 实例）
+
+任何检查失败时命令以**非 0 退出码**结束，可直接用于脚本/CI 判断。
 
 ### `hermes-team status`
 
@@ -380,6 +399,18 @@ Options:
 **问题：** `hermes pairing approve` 写入的审批文件不够，还需要 `.env` 中的 `FEISHU_ALLOWED_USERS`。
 
 **解决：** `configure` 命令自动设置所有必需的 `.env` 字段。
+
+### 6. `FEISHU_GROUP_POLICY` 默认是 allowlist，空名单会拒收所有群消息
+
+**问题：** Hermes 现行默认 `FEISHU_GROUP_POLICY=allowlist`，且 allowlist 为空时**所有群消息都会被拒**（私聊不受影响），群聊表现为全员沉默。
+
+**解决：** `configure` 命令默认写入 `FEISHU_GROUP_POLICY=open`；若选 `allowlist`，务必同时填写 `FEISHU_ALLOWED_USERS`。
+
+### 7. 卡片按钮回调要配在「回调配置」tab
+
+**问题：** `card.action.trigger` 如果加在「事件订阅」tab，点击卡片按钮会报错 200340/220340，事件根本不会到达 Hermes。
+
+**解决：** 在飞书开发者后台 → 回调配置（订阅方式选长连接）→ 添加 `card.action.trigger` → 开启交互卡片 → 发布新版本。
 
 ---
 

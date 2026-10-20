@@ -1,3 +1,3 @@
 """hermes-multi-agent-team: Automate multi-agent team setup for Hermes Agent + Feishu."""
 
-__version__ = "0.1.0"
+__version__ = "0.4.0"

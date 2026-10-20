@@ -8,12 +8,13 @@ from hermes_multi_agent_team import __version__
 @click.group()
 @click.version_option(version=__version__, prog_name="hermes-team")
 def cli() -> None:
-    """🚀 hermes-multi-agent-team — Automate multi-agent team setup for Hermes + Messaging Platforms.
+    """🚀 hermes-multi-agent-team — Automate multi-agent team setup for Hermes + Feishu.
 
-    Set up, configure, and manage a team of AI agents on Feishu, Telegram, Discord, or Slack
-    using Hermes profiles.
+    Automated setup currently covers Feishu/Lark only: `configure` writes FEISHU_*
+    keys and `start` validates Feishu credentials. Other platforms (Telegram,
+    Discord, Slack) are supported by Hermes itself but need manual .env editing
+    and cannot pass `hermes-team start` credential validation.
     """
-    pass
 
 
 # Lazy imports so the CLI starts fast
@@ -48,12 +49,18 @@ def configure(prefix: str, dry_run: bool) -> None:
 
 @cli.command()
 @click.option("--prefix", required=True, help="Profile name prefix.")
+@click.option(
+    "--standalone",
+    is_flag=True,
+    help="Legacy mode: start one gateway per profile (Hermes >= 0.19 requires "
+    "gateway.standalone: true in each profile's config.yaml).",
+)
 @click.option("--dry-run", is_flag=True, help="Show commands without running them.")
-def start(prefix: str, dry_run: bool) -> None:
-    """🔌 Install and start the Feishu gateway for all team profiles."""
+def start(prefix: str, standalone: bool, dry_run: bool) -> None:
+    """🔌 Start the gateway serving all team profiles (multiplexed since Hermes 0.19)."""
     from hermes_multi_agent_team.commands.start import start_team
 
-    start_team(prefix=prefix, dry_run=dry_run)
+    start_team(prefix=prefix, dry_run=dry_run, standalone=standalone)
 
 
 @cli.command("collect-ids")

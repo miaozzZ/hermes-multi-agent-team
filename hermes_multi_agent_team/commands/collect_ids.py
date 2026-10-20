@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 import click
 
 from hermes_multi_agent_team.utils.open_id import (
@@ -85,7 +84,7 @@ def collect_team_ids(prefix: str) -> None:
             click.echo(f"  ✅ {agent_name} → {global_mapping[agent_name]}")
         elif len(bot_ids) > 1:
             click.echo(f"  ⚠️  {profile_name}: multiple bot IDs found, using first one")
-            global_mapping[agent_name] = sorted(bot_ids)[0]
+            global_mapping[agent_name] = min(bot_ids)
         else:
             click.echo(f"  ⚠️  {profile_name}: no bot IDs found in logs")
 
