@@ -222,10 +222,11 @@ hermes-team verify --prefix MyTeam
 hermes-team init [OPTIONS]
 
 Options:
-  --team-name TEXT    团队名称  [required]
-  --roles TEXT        角色列表，逗号分隔 (pm,fe,be,qa,ui)  [default: pm,fe,be,qa,ui]
+  --team-name TEXT    团队名称（命令行或 --config 文件二选一提供）
+  --roles TEXT        角色列表，逗号分隔；缺省 = 全部角色
   --prefix TEXT       Profile 名称前缀（默认使用 team-name）
   --clone-from TEXT   从已有 Profile 克隆模型配置
+  --config PATH       团队配置 JSON：自定义角色/名称/模板（见下节）
   --dry-run           显示将要执行的操作，不实际执行
 ```
 
@@ -239,7 +240,15 @@ hermes-team init --team-name MyTeam --roles pm,fe
 
 # 从已有 profile 克隆模型配置
 hermes-team init --team-name MyTeam --clone-from my-base-profile
+
+# 使用自定义团队配置
+hermes-team init --config my-team.json
 ```
+
+**重跑行为：**
+- 渲染名单 = 本次 `--roles` 选中的角色 ∪ 磁盘上仍活跃的团队成员（`add-member` 加入的成员、旧版无元数据 profile——后者按 profile 后缀识别）：子集重跑不会把未选中的成员从 SOUL 名单里挤掉，输出会提示 `Including N on-disk member(s) ...`；on-disk 成员与配置角色重名时报错（名字必须全局唯一，collect-ids 按名匹配）
+- 磁盘上残留的 coordinator profile（元数据 `coordinator=true`）按总管对待、优先于配置里的 render-only hub（与 add-member 的名单重建优先级一致），不会被当成普通成员渲染
+- `remove-member --keep-profile` 移除的成员不会被复活：重跑 init 跳过该 profile 并提示（被移除的 coordinator 同样宣告跳过，不再显示"将创建"）
 
 ### `hermes-team configure`
 
@@ -296,6 +305,54 @@ Options:
 - 读取每个 Profile 的 `logs/gateway.log`
 - 正则匹配 `sender=bot:ou_xxx` 和 `sender=user:ou_xxx`
 - 自动更新 SOUL.md 中 `【飞书@方式】` 的 open_id
+
+### `hermes-team add-member`
+
+向已有团队增加一个成员，并同步所有成员的 SOUL 名单。
+
+```bash
+hermes-team add-member [OPTIONS]
+
+Options:
+  --prefix TEXT     团队前缀  [required]
+  --key TEXT        角色 key（profile 名为 <prefix>-<key>）  [required]
+  --name TEXT       显示名（SOUL @标签用，须全团队唯一）  [required]
+  --role TEXT       职位  [required]
+  --nickname TEXT   小名（默认同 --name）
+  --template TEXT   SOUL 模板：文件路径或内置短名；缺省用 --key 对应的内置模板
+  --clone-from TEXT 从已有 Profile 克隆模型配置
+  --dry-run         只显示将要做的变更
+```
+
+**行为：**
+- 从各 profile 的 `.hermes-team.json` 元数据重建团队名单（旧版无元数据团队自动回退内置角色表 + M总 占位）
+- **先收获**所有 SOUL 里已回填的真实 open_id，重建后再回灌——加人不会把已收集的 open_id 重置成占位符
+- 新成员的 SOUL 用完整名单渲染（队友的真实 open_id 直接带入）；存量成员的 SOUL 按其元数据记录的模板重渲染
+- 只对【飞书@方式】小节做补丁式更新、不整体重渲染的两种情况：① 旧版无元数据（legacy）成员——原团队名只存在于其 SOUL 文本中，重渲染会把团队名错改成 prefix（新成员的团队名会从现有 SOUL 中提取复用，提取不到才回退 prefix）；② 自定义模板文件已不存在——不覆盖手写人设
+
+**加人后：** `configure`（新成员要自己的飞书 App）→ 拉进群 → 等 ~30s host 重扫 → `collect-ids`（回填新成员 open_id）。
+
+### `hermes-team remove-member`
+
+从团队移除一个成员，并同步其余成员的 SOUL 名单。
+
+```bash
+hermes-team remove-member [OPTIONS]
+
+Options:
+  --prefix TEXT   团队前缀  [required]
+  --key TEXT      要移除成员的角色 key  [required]
+  --keep-profile  保留 Hermes profile（只从团队名单和 SOUL 中移除）
+  --force         跳过确认
+  --dry-run       只显示将要做的变更
+```
+
+**行为：**
+- 默认**删除**该成员的 profile 目录并写入 tombstone（`profiles/.deleted/<name>`，与 Hermes 自身的删除语义一致）；`--keep-profile` 只把它从名单移除
+- 其余成员的 SOUL 重渲染为不含该成员的名单，已收集的 open_id 保留
+- 移除的是总管（coordinator）时会明确警告：剩余成员的 SOUL 将不再有总管条目
+- 不能移除团队最后一个成员（用 `destroy`）
+- 飞书侧需要手动把机器人移出群
 
 ### `hermes-team verify`
 
@@ -416,28 +473,43 @@ Options:
 
 ## 🎨 自定义角色
 
-你可以修改模板文件来创建自定义角色：
+角色和名称通过**团队配置 JSON** 外置定义，不需要改代码。写一个 `my-team.json`：
 
-```bash
-# 模板位置
-hermes_multi_agent_team/templates/
-├── SOUL/
-│   ├── coordinator.md.j2    # 总管
-│   ├── pm.md.j2             # 产品经理
-│   ├── frontend.md.j2       # 前端开发
-│   ├── backend.md.j2        # 后端开发
-│   ├── qa.md.j2             # 测试QA
-│   └── designer.md.j2       # UI设计
-├── env.j2                   # .env 模板
-└── config.yaml.j2           # config.yaml 模板
+```json
+{
+  "team_name": "ContentTeam",
+  "prefix": "content",
+  "roles": [
+    {"key": "writer", "name": "阿写", "nickname": "写写", "role": "内容创作",
+     "template": "souls/writer.md.j2"},
+    {"key": "ops", "name": "老运", "role": "运维", "template": "backend"}
+  ],
+  "coordinator": {"key": "boss", "name": "老板", "role": "总管", "template": "coordinator"}
+}
 ```
 
-Jinja2 变量：
-- `{{ name }}` — 显示名称
-- `{{ nickname }}` — 小名
-- `{{ role }}` — 角色标题
+```bash
+hermes-team init --config my-team.json
+```
+
+字段说明：
+- `team_name` / `prefix`：可选默认值，命令行参数优先
+- `roles`：每个角色需要 `key`（进入 profile 名 `<prefix>-<key>`，限字母/数字/`-`/`_`）、`name`（SOUL 与 collect-ids 回填 open_id 的匹配名，**必须全局唯一**）、`role`（职位）；`nickname` 缺省等于 `name`
+- `coordinator`：可选。声明后 init 会**一并创建总管 profile** 并渲染总管 SOUL（不声明则沿用旧行为：不建总管 profile，总管由你的主 profile 担任）
+- `coordinator_fallback`：可选，与 `coordinator` **互斥**（两者同时声明会在加载时报错）。声明一个 **render-only 总管条目**（`name` 必填；`role` 缺省 `总管`，`nickname` 缺省 `name`）：只进入 `team_members` 供成员 @（内置模板要求「只 @总管 汇报」），不建 profile、不参与 open_id 自动回填；名称须与角色名互异。内置默认团队自带的这一条目为 `M总`
+- `template`：自定义角色必须指定。可以是相对 config 文件的**模板文件路径**（完全自定义人设；只相对 config 所在目录解析，不回退当前目录），也可以复用内置模板的短名（`pm`/`frontend`/`backend`/`qa`/`designer`/`coordinator`）；内置 5 角色（pm/fe/be/qa/ui）不写则用默认模板
+
+init 会在每个 profile 里写入 `.hermes-team.json` 元数据，`collect-ids` 据此适配自定义角色名（**声明 coordinator 时**总管的 open_id 也自动回填），旧团队（无元数据）自动回退到内置角色表；`verify` 不读元数据——它按 `ou_xxx` 前缀识别占位符 open_id，天然适配任意角色名。注意：**声明了 `coordinator_fallback` 的团队（以及内置默认团队）**才有 render-only 总管占位（无 profile/元数据），其 open_id **不参与自动回填**，需要时手动填写；两者都未声明的自定义团队 roster 中没有任何总管条目。
+
+自定义 SOUL 模板是 Jinja2，可用变量：
+- `{{ name }}` / `{{ nickname }}` / `{{ role }}` — 本角色的显示名/小名/职位
 - `{{ team_name }}` — 团队名称
-- `{{ team_members }}` — 团队成员列表
+- `{{ team_members }}` — 团队成员列表（`name`/`nickname`/`role`/`open_id`），声明 coordinator 时总管排第一；不声明时若声明了 `coordinator_fallback`（或内置默认团队自带的 `M总`）则该 render-only 总管条目排第一，否则只含声明的角色（注意：内置模板要求成员「只 @总管 汇报」，建议声明 `coordinator` 或 `coordinator_fallback`，否则成员没有可 @ 的总管条目，init 也会给出警告）
+- `{{ owner_open_id }}` — 主人 open_id 占位
+
+> 提示：人设正文要保留 `【飞书@方式】` 小节并使用 `{% for member in team_members %}` 循环生成 `<at user_id="{{ member.open_id }}">...</at>`，collect-ids 才能自动回填 open_id。
+
+内置模板位于 `hermes_multi_agent_team/templates/SOUL/`（coordinator/pm/frontend/backend/qa/designer），可直接复制一份改写。
 
 ---
 

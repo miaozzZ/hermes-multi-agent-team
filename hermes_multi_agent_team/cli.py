@@ -19,21 +19,40 @@ def cli() -> None:
 
 # Lazy imports so the CLI starts fast
 @cli.command()
-@click.option("--team-name", prompt="Team name", help="Name for the agent team.")
+@click.option("--team-name", default=None, help="Name for the agent team.")
 @click.option(
-    "--roles", default="pm,fe,be,qa,ui", help="Comma-separated role keys (pm,fe,be,qa,ui)."
+    "--roles",
+    default=None,
+    help="Comma-separated role keys, a subset of the team's roles (default: all of them).",
 )
 @click.option("--prefix", default=None, help="Profile name prefix (default: team name).")
 @click.option("--clone-from", default=None, help="Clone model config from this profile.")
+@click.option(
+    "--config",
+    "config",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Team config JSON defining custom roles/names/templates (see examples/).",
+)
 @click.option("--dry-run", is_flag=True, help="Show what would be created without doing it.")
 def init(
-    team_name: str, roles: str, prefix: str | None, clone_from: str | None, dry_run: bool
+    team_name: str | None,
+    roles: str | None,
+    prefix: str | None,
+    clone_from: str | None,
+    config: str | None,
+    dry_run: bool,
 ) -> None:
     """🏗️  Create Hermes profiles and generate SOUL.md for each team role."""
     from hermes_multi_agent_team.commands.init import init_team
 
     init_team(
-        team_name=team_name, roles=roles, prefix=prefix, clone_from=clone_from, dry_run=dry_run
+        team_name=team_name,
+        roles=roles,
+        prefix=prefix,
+        clone_from=clone_from,
+        dry_run=dry_run,
+        config=config,
     )
 
 
@@ -70,6 +89,64 @@ def collect_ids(prefix: str) -> None:
     from hermes_multi_agent_team.commands.collect_ids import collect_team_ids
 
     collect_team_ids(prefix=prefix)
+
+
+@cli.command("add-member")
+@click.option("--prefix", required=True, help="Profile name prefix of the team.")
+@click.option("--key", required=True, help="Role key (becomes profile name <prefix>-<key>).")
+@click.option("--name", required=True, help="Display name used in SOUL.md @tags (must be unique).")
+@click.option("--role", required=True, help="Job title.")
+@click.option("--nickname", default=None, help="Nickname (default: same as --name).")
+@click.option(
+    "--template",
+    default=None,
+    help="SOUL template: a file path or a builtin name "
+    "(pm/frontend/backend/qa/designer/coordinator); default: the builtin template for --key, if any.",
+)
+@click.option("--clone-from", default=None, help="Clone model config from this profile.")
+@click.option("--dry-run", is_flag=True, help="Show what would change without doing it.")
+def add_member(
+    prefix: str,
+    key: str,
+    name: str,
+    role: str,
+    nickname: str | None,
+    template: str | None,
+    clone_from: str | None,
+    dry_run: bool,
+) -> None:
+    """➕ Add a member to an existing team (syncs every member's SOUL roster)."""
+    from hermes_multi_agent_team.commands.member import add_member as add_member_impl
+
+    add_member_impl(
+        prefix=prefix,
+        key=key,
+        name=name,
+        role=role,
+        nickname=nickname,
+        template=template,
+        clone_from=clone_from,
+        dry_run=dry_run,
+    )
+
+
+@cli.command("remove-member")
+@click.option("--prefix", required=True, help="Profile name prefix of the team.")
+@click.option("--key", required=True, help="Role key of the member to remove.")
+@click.option(
+    "--keep-profile",
+    is_flag=True,
+    help="Keep the Hermes profile (only remove it from the team roster and SOULs).",
+)
+@click.option("--force", is_flag=True, help="Skip the removal confirmation prompt.")
+@click.option("--dry-run", is_flag=True, help="Show what would change without doing it.")
+def remove_member(prefix: str, key: str, keep_profile: bool, force: bool, dry_run: bool) -> None:
+    """➖ Remove a member from a team (deletes their profile unless --keep-profile)."""
+    from hermes_multi_agent_team.commands.member import remove_member as remove_member_impl
+
+    remove_member_impl(
+        prefix=prefix, key=key, keep_profile=keep_profile, force=force, dry_run=dry_run
+    )
 
 
 @cli.command()

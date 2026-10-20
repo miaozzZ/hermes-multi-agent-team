@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.6.0] - 2026-10-20
+
+### ➕➖ 团队成员增减（add-member / remove-member）
+
+在已有团队上增减成员，并保持**所有成员的 SOUL 名单同步**：
+
+- ➕ `hermes-team add-member --prefix X --key K --name N --role R [--nickname] [--template] [--clone-from]`
+  - 从各 profile 的 `.hermes-team.json` 元数据重建团队名单（旧版无元数据团队回退内置角色表 + M总 render-only 占位）
+  - **open_id 先收获后回灌**：改名单前先从所有 SOUL 收集已回填的真实 open_id，重渲染后再应用——增减成员永远不会把已收集的 open_id 重置成占位符；新成员的 SOUL 直接带队友的真实 open_id
+  - 存量成员 SOUL 按元数据记录的模板重渲染；两种情况只补丁【飞书@方式】小节、不整体重渲染：① 旧版无元数据（legacy）成员——原团队名只存在于其 SOUL 文本，重渲染会把团队名错改成 prefix（新成员的团队名从现有 SOUL 提取复用，提取不到才回退 prefix）；② 自定义模板文件已丢失——不覆盖手写人设
+- ➖ `hermes-team remove-member --prefix X --key K [--keep-profile] [--force]`
+  - 默认删除 profile 目录并写 tombstone（`profiles/.deleted/<name>`，与 Hermes 删除语义一致，host 不再服务）；`--keep-profile` 只移出名单（标记持久化在该 profile 元数据里，名单重建与 collect-ids 均跳过；同 key 重新 add-member 即重新入队并清除标记）；被移除的成员在 init 重跑时保持移除——跳过并提示（含 coordinator，不再显示"将创建"）
+- 🔁 init 子集重跑（`--roles`）：渲染名单为选中角色与磁盘活跃成员的**并集**（`add-member` 加入的成员、旧版无元数据 legacy profile——按 profile 后缀识别），未选中成员不再从 SOUL 名单消失（输出 `Including N on-disk member(s) ...`）；on-disk 成员与配置角色**重名时报错**（collect-ids 按名匹配）；磁盘上残留的 coordinator profile（元数据 `coordinator=true`）按总管对待、优先于配置 hub（与 add-member 的名单重建优先级一致）
+- 🏷️ init 元数据新增 `template` 字段（内置名或外部模板路径），供日后重建该成员 SOUL
+- 🧰 `team_config` 新增公共 `make_role_spec()`/`builtin_template_for_key()`；`open_id` 新增 `harvest_open_ids()`；init 的渲染设施改为可复用
+- 📚 README/README_EN/CHANGELOG 同步；测试 108 → 176
+
+## [0.5.0] - 2026-10-20
+
+### 🎭 角色配置外置（team config JSON）
+
+角色、名称、模板不再硬编码在代码里，通过 `--config` 传入 JSON 定义：
+
+- ➕ `hermes-team init --config my-team.json`：自定义角色 key/名称/小名/职位/SOUL 模板；`team_name`/`prefix` 可在文件中给默认值（命令行参数优先）；`--roles` 变为可选的子集筛选（缺省 = 全部角色，显式空值报错而非创建全部）
+- 🧠 `coordinator` 小节（可选）：声明后 init **一并创建总管 profile** 并渲染总管 SOUL——补上了此前「总管 profile 需手动创建」的缺口；总管模板缺省用内置 `coordinator.md.j2`。不声明 coordinator 时可用 `coordinator_fallback` 声明 **render-only 总管条目**（与 `coordinator` 互斥，同时声明在加载时报错；只进 roster 供成员 @，不建 profile、不参与 open_id 自动回填；`name` 必填，`role`/`nickname` 可选）；内置默认团队自带的这一条目为 `M总`，两者都未声明的自定义团队 roster 无总管条目（init 会警告）
+- 📄 模板三态解析：相对 config 的**文件路径**（完全自定义人设；仅相对 config 目录解析，不再回退 cwd）/ 内置模板短名（pm/frontend/backend/qa/designer/coordinator）/ 内置角色缺省模板
+- 🏷️ init 为每个 profile 写入 `.hermes-team.json` 元数据；`collect-ids` 据此按**名称**回填 open_id（自定义角色名自动回填；**声明 coordinator 时**总管 open_id 也自动回填——补上了此前「M总 open_id 需手动填」的缺口。声明了 `coordinator_fallback` 的团队（及内置默认团队）才有 render-only 总管占位、无 profile/元数据，其 open_id 不在自动回填之列；两者都未声明的自定义团队 roster 无总管条目）；无元数据的旧团队自动回退内置角色表
+- 🚪 init 在部分角色创建/渲染失败时以**非 0 退出码**结束（与 verify/doctor 一致；此前失败也退出 0，脚本 `&&` 链无法感知）
+- ✅ 校验：key 字符集（进入 profile 名）、key/名称全局唯一（重名会让 collect-ids 匹配歧义）、template 可解析性；坏配置在创建任何 profile 前失败
+- 🧹 `verify` 的占位符 open_id 排除改为按前缀（`ou_xxx*`），不再枚举角色 key
+- 📚 README/README_EN 重写「自定义角色」章节；`examples/baogoet-team/team.json` 更新为可用的配置示例
+
 ## [0.4.0] - 2026-10-20
 
 ### 🔄 适配 Hermes >= 0.19 multiplexed gateway（破坏性变更）

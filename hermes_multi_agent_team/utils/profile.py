@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import shutil
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -154,6 +156,22 @@ def list_all_profile_names() -> list[str]:
     )
 
 
+def remove_tombstone(name: str) -> bool:
+    """Remove the ``profiles/.deleted/<name>`` tombstone (re-add / re-init).
+
+    A tombstone left behind would keep hiding the freshly (re-)created
+    profile from list_team_profiles/collect-ids even though add-member or
+    init just rebuilt it. Returns True when a tombstone existed and was
+    removed; False when there was none. Deletion failures raise OSError —
+    callers must warn (the profile would stay invisible otherwise).
+    """
+    tombstone = get_profiles_dir() / ".deleted" / name
+    if not tombstone.exists():
+        return False
+    shutil.rmtree(tombstone)  # raises OSError on failure — callers warn
+    return True
+
+
 def profile_served_by_host(name: str) -> bool:
     """Whether the host multiplex gateway serves this named profile.
 
@@ -165,6 +183,30 @@ def profile_served_by_host(name: str) -> bool:
     if (profile_dir / "gateway.parked").exists():
         return False
     return not _config_gateway_standalone(profile_dir)
+
+
+# Written by `hermes-team init` into every profile it creates: which role the
+# profile plays (key/name/nickname/role, coordinator flag). collect-ids reads
+# it to map profiles back to SOUL.md names without relying on hardcoded role
+# tables. (verify does not read it — its open_id check is role-agnostic,
+# excluding placeholders by their "ou_xxx" prefix.)
+TEAM_METADATA_FILENAME = ".hermes-team.json"
+
+
+def read_team_metadata(name: str) -> dict:
+    """Read a profile's team metadata written at init time.
+
+    Returns {} when absent (teams created before this existed) or unreadable —
+    callers fall back to the builtin role tables.
+    """
+    metadata_path = get_profile_dir(name) / TEAM_METADATA_FILENAME
+    if not metadata_path.exists():
+        return {}
+    try:
+        data = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _config_gateway_standalone(profile_dir: Path) -> bool:

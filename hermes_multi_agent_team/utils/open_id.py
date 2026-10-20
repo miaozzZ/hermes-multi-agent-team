@@ -77,6 +77,27 @@ def extract_open_id_with_names(log_path: str | Path) -> dict[str, dict[str, str]
     return {"bot": bots, "user": users}
 
 
+# Real open_id inside an <at> tag: "ou_" + alphanumerics, but never a
+# placeholder ("ou_xxx…" is not a real id; real Feishu ids are hex-ish).
+_AT_TAG_RE = re.compile(r'<at user_id="(ou_[A-Za-z0-9]+)">([^<]+)</at>')
+
+
+def harvest_open_ids(soul_text: str) -> dict[str, str]:
+    """Extract name → open_id pairs from a SOUL.md's <at> tags.
+
+    Placeholders ("ou_xxx…") are skipped. When the same name carries
+    different ids across tags, the first occurrence wins — within one team
+    the same name is always the same agent, and ids only disagree when a
+    fill went stale.
+    """
+    mapping: dict[str, str] = {}
+    for open_id, name in _AT_TAG_RE.findall(soul_text):
+        if open_id.startswith("ou_xxx"):
+            continue
+        mapping.setdefault(name, open_id)
+    return mapping
+
+
 def update_soul_md_open_ids(soul_path: str | Path, open_id_mapping: dict[str, str]) -> bool:
     """Update the 【飞书@方式】 section in a SOUL.md file with open_id mappings.
 

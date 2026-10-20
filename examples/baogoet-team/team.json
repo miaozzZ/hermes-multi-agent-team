@@ -2,15 +2,11 @@
   "team_name": "BaGoet",
   "prefix": "baoget",
   "roles": [
-    {"key": "pm", "name": "P酱", "nickname": "小P", "role": "产品经理", "template": "pm"},
-    {"key": "fe", "name": "F仔", "nickname": "小F", "role": "前端开发", "template": "frontend"},
-    {"key": "be", "name": "B叔", "nickname": "小B", "role": "后端开发", "template": "backend"},
-    {"key": "qa", "name": "Q宝", "nickname": "小Q", "role": "测试QA", "template": "qa"},
-    {"key": "ui", "name": "U酱", "nickname": "小U", "role": "UI设计", "template": "designer"}
+    {"key": "pm", "name": "P酱", "nickname": "小P", "role": "产品经理"},
+    {"key": "fe", "name": "F仔", "nickname": "小F", "role": "前端开发"},
+    {"key": "be", "name": "B叔", "nickname": "小B", "role": "后端开发"},
+    {"key": "qa", "name": "Q宝", "nickname": "小Q", "role": "测试QA"},
+    {"key": "ui", "name": "U酱", "nickname": "小U", "role": "UI设计"}
   ],
-  "platform": "feishu",
-  "model": {
-    "default": "your-model-name",
-    "provider": "your-provider"
-  }
+  "coordinator": {"key": "coord", "name": "M总", "nickname": "小m", "role": "总管"}
 }

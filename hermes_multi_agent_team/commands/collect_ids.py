@@ -12,9 +12,11 @@ from hermes_multi_agent_team.utils.profile import (
     get_profile_dir,
     list_team_profiles,
     read_soul,
+    read_team_metadata,
 )
 
-# Mapping from role suffix to the name used in SOUL.md at tags
+# Legacy fallback for teams created before per-profile metadata existed:
+# profile suffix → the name used in SOUL.md @tags.
 ROLE_NAME_MAP: dict[str, str] = {
     "pm": "P酱",
     "fe": "F仔",
@@ -24,17 +26,29 @@ ROLE_NAME_MAP: dict[str, str] = {
 }
 
 
-def _infer_role_from_profile(profile_name: str) -> str | None:
-    """Infer the role key from a profile name like 'teamname-pm'."""
+def _agent_name_for_profile(profile_name: str) -> str | None:
+    """The SOUL.md @tag name of this profile's agent, or None if unknown.
+
+    Prefers the .hermes-team.json metadata init wrote (custom roles, the
+    coordinator); falls back to the builtin suffix table for legacy teams.
+    """
+    metadata = read_team_metadata(profile_name)
+    name = metadata.get("name")
+    if isinstance(name, str) and name:
+        return name
     parts = profile_name.rsplit("-", 1)
     if len(parts) == 2 and parts[1] in ROLE_NAME_MAP:
-        return parts[1]
+        return ROLE_NAME_MAP[parts[1]]
     return None
 
 
 def collect_team_ids(prefix: str) -> None:
     """Auto-extract Feishu open_ids from gateway logs and update SOUL.md."""
     profiles = list_team_profiles(prefix)
+    # Profiles kept on disk via `remove-member --keep-profile` carry a
+    # "removed" marker: they are no longer team members, so their logs must
+    # not feed the name→open_id mapping nor their SOULs be rewritten.
+    profiles = [p for p in profiles if not read_team_metadata(p).get("removed")]
 
     if not profiles:
         raise click.ClickException(
@@ -64,18 +78,18 @@ def collect_team_ids(prefix: str) -> None:
 
         click.echo(f"  📋 {profile_name}: found {len(bot_ids)} bot(s), {len(user_ids)} user(s)")
 
-    # Build a global mapping: role → open_id
-    # Strategy: each profile's bot open_id is that agent's own ID
-    # We map bot IDs from each profile to the corresponding role
+    # Build a global mapping: agent name → open_id.
+    # Each profile's own bot open_id is that agent's ID (open_ids are per-app,
+    # so each agent appears under a different id in every other app's logs —
+    # the one id reliably visible in a profile's own log is its own bot).
     global_mapping: dict[str, str] = {}  # name → open_id
 
     for profile_name in profiles:
-        role_key = _infer_role_from_profile(profile_name)
-        if not role_key:
-            click.echo(f"  ⚠️  {profile_name}: could not infer role, skipping")
+        agent_name = _agent_name_for_profile(profile_name)
+        if not agent_name:
+            click.echo(f"  ⚠️  {profile_name}: could not determine agent name, skipping")
             continue
 
-        agent_name = ROLE_NAME_MAP.get(role_key, "")
         bot_ids = all_bots.get(profile_name, set())
 
         if len(bot_ids) == 1:

@@ -99,12 +99,11 @@ def _check_profile(profile_name: str) -> dict[str, tuple[bool, str]]:
         placeholder_pattern = re.compile(r'user_id="ou_xxx[^"]*"')
         has_placeholders = bool(placeholder_pattern.search(soul))
         real_id_pattern = re.compile(r'user_id="(ou_[a-zA-Z0-9]+)"')
-        real_ids = set(real_id_pattern.findall(soul)) - {
-            "ou_xxx_pm",
-            "ou_xxx_fe",
-            "ou_xxx_be",
-            "ou_xxx_qa",
-            "ou_xxx_ui",
+        # Placeholders are "ou_xxx" + any role key (custom teams included).
+        # Real Feishu open_ids are "ou_" + hex-ish characters, so they never
+        # start with "xxx" — excluding by prefix is role-key-agnostic.
+        real_ids = {
+            open_id for open_id in real_id_pattern.findall(soul) if not open_id.startswith("ou_xxx")
         }
 
         if has_placeholders and not real_ids:

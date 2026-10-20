@@ -121,16 +121,23 @@ test(destroy): add force-delete test case
 
 ### Step 2: 注册角色
 
-在 `hermes_multi_agent_team/commands/init.py` 的 `ROLE_DEFAULTS` 中添加：
+角色定义在 `hermes_multi_agent_team/team_config.py`，按需选择：
 
 ```python
-"devops": {
-    "name": "D哥",
-    "nickname": "小D",
-    "role": "DevOps",
-    "template": "devops.md.j2",
-},
+# ① _BUILTIN_TEMPLATES：注册模板短名，自定义团队即可用 "template": "devops" 复用
+_BUILTIN_TEMPLATES: dict[str, str] = {
+    # ...已有的条目...
+    "devops": "devops.md.j2",
+}
+
+# ② builtin_team_config() 的 roles 列表：把角色纳入默认团队
+#    （内置 key 不写 template 也能解析）
+roles = [
+    RoleSpec(key="devops", name="D哥", nickname="小D", role="DevOps", template="devops.md.j2"),
+]
 ```
+
+也可以完全不改代码：写一个团队 JSON 配置，用 `hermes-team init --config my-team.json` 引用你的模板文件（路径相对 config），详见 README「自定义角色」。
 
 ### Step 3: 提交 PR
 
