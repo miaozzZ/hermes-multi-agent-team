@@ -449,3 +449,31 @@ def make_role_spec(
     if template is not None:
         raw["template"] = template
     return _parse_role(raw, Path.cwd(), "role")
+
+
+def validate_role_key(key: str) -> str:
+    """Strip and validate a role key for immediate interactive feedback.
+
+    Same rule _parse_role enforces (filename-safe: it becomes part of the
+    profile name); returns the stripped key or raises TeamConfigError.
+    """
+    cleaned = key.strip()
+    if not cleaned or not _KEY_RE.match(cleaned):
+        raise TeamConfigError(
+            f"role key '{cleaned or key}' is invalid (use letters, digits, '-' and '_'; "
+            "it becomes part of the profile name)"
+        )
+    return cleaned
+
+
+def validate_role_name(name: str) -> str:
+    """Strip and validate a display name for immediate interactive feedback.
+
+    Non-empty, at-safe, and not the reserved owner name — the same rules
+    _parse_role applies. Returns the stripped name or raises TeamConfigError.
+    """
+    cleaned = name.strip()
+    if not cleaned:
+        raise TeamConfigError("'name' must be a non-empty string")
+    _check_at_safe("role", "name", cleaned)
+    return cleaned

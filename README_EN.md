@@ -191,6 +191,7 @@ hermes-team verify --prefix MyTeam
 | Command | Description |
 |---------|-------------|
 | `hermes-team init` | Create profiles + generate SOUL.md templates |
+| `hermes-team new-config` | Interactive wizard that writes a team config JSON |
 | `hermes-team configure` | Interactively configure .env for each profile |
 | `hermes-team start` | Start the host multiplex gateway serving all profiles |
 | `hermes-team collect-ids` | Auto-extract platform IDs from gateway logs |
@@ -208,6 +209,8 @@ Run `hermes-team <command> --help` for detailed options.
 ## 🎨 Custom Roles
 
 Roles and names are externalized to a **team config JSON** — no code changes needed. Write a `my-team.json`:
+
+> 💡 Don't want to hand-write JSON? Run `hermes-team new-config` (or `hermes-team new-config path.json`): the wizard asks step by step and validates as you answer (invalid keys / duplicate names re-ask immediately), offers the three hub arrangements (dedicated profile / main profile as hub / none), lets you start from the builtin five roles, and writes a config that is **guaranteed to load** (round-trip validated on a temp file before replacing the target), printing the next commands at the end.
 
 ```json
 {

@@ -149,6 +149,15 @@ def remove_member(prefix: str, key: str, keep_profile: bool, force: bool, dry_ru
     )
 
 
+@cli.command("new-config")
+@click.argument("output_path", required=False)
+def new_config(output_path: str | None) -> None:
+    """🪄 Interactively build a team config JSON (then run init --config with it)."""
+    from hermes_multi_agent_team.commands.wizard import run_wizard
+
+    run_wizard(output_path)
+
+
 @cli.command()
 @click.option("--prefix", required=True, help="Profile name prefix.")
 def verify(prefix: str) -> None:

@@ -354,6 +354,16 @@ Options:
 - 不能移除团队最后一个成员（用 `destroy`）
 - 飞书侧需要手动把机器人移出群
 
+### `hermes-team new-config`
+
+交互式向导，生成团队配置 JSON（配合 `init --config` 使用）。
+
+```bash
+hermes-team new-config [OUTPUT_PATH]
+```
+
+流程：团队名称 → 前缀（路径安全校验）→ 总管安排三选一（独立 profile / 主 profile 担任 render-only / 无）→ 角色名单（从内置 5 角色逐个取舍，再添加自定义角色；与已选角色 key/名称冲突的内置角色自动跳过）→ 预览并写出。key/名称非法或重复时立即重问该项（其余错误重填该角色）；写出前先用与 `init --config` 相同的加载器在临时文件上回环验证，通过后才原子替换目标文件。
+
 ### `hermes-team verify`
 
 全面验证团队配置。
@@ -474,6 +484,8 @@ Options:
 ## 🎨 自定义角色
 
 角色和名称通过**团队配置 JSON** 外置定义，不需要改代码。写一个 `my-team.json`：
+
+> 💡 不想手写 JSON？运行 `hermes-team new-config`（或 `hermes-team new-config 路径.json`）：向导逐项提问、边填边校验（非法 key / 重名会立即重问），总管安排三选一（独立 profile / 主 profile 担任 / 无），从内置 5 角色逐个取舍、再添加自定义角色，最后写出**保证可加载**的配置文件并提示下一步命令。
 
 ```json
 {

@@ -20,11 +20,11 @@ def test_cli_version():
     runner = CliRunner()
     result = runner.invoke(cli, ["--version"])
     assert result.exit_code == 0
-    assert "0.6.0" in result.output
+    assert "0.7.0" in result.output
 
 
 def test_cli_lists_all_commands():
-    """CLI help should list all 10 commands."""
+    """CLI help should list all 11 commands."""
     runner = CliRunner()
     result = runner.invoke(cli, ["--help"])
     for cmd in [
@@ -32,6 +32,7 @@ def test_cli_lists_all_commands():
         "configure",
         "start",
         "collect-ids",
+        "new-config",
         "add-member",
         "remove-member",
         "verify",
