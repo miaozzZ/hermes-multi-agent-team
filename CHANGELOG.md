@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.8.0] - 2026-10-21
+
+### 🤖 独立单功能 agent 成为一等公民（new-bot）
+
+不需要团队的单职责 bot（签到/播报/查询…）有了专门入口：
+
+- ➕ `hermes-team new-bot NAME [--display-name] [--description] [--template] [--clone-from] [--dry-run]`：创建独立 profile（名字即 profile 名，无前缀拼接）+ 渲染**无名单**的简洁 SOUL + 写入 `standalone: true` 元数据
+- 📄 新增内置 `bot` 模板（职责/响应规则/风格，无【飞书@方式】），`bot` 同时注册为模板短名（团队配置也能用；团队渲染上下文以 role 文本充当 `description` 插槽，身份句按 `team_name` 分支——团队渲染自称该团队专注单一职责的成员，standalone 渲染仍说"不属于任何团队"）。`--template` 接受文件路径或内置 `bot` 短名；**内置团队模板（pm/frontend/coordinator…）会被拒绝**——它们渲染名单与 @方式 小节，独立 bot 没有对应上下文（此前会静默渲染出空插值的残缺 SOUL）；自定义模板以严格未定义变量模式渲染，引用 `team_members` 等团队变量会显式报错而非渲染为空
+- 🔌 host 网关本来就服务一切 profile——新 bot 建好即被收编（~30s 重扫）；要进群则 `configure --prefix NAME`（要自己的飞书 App）
+- 🎛️ `configure` 感知 standalone：单功能 bot 的 `FEISHU_REQUIRE_MENTION` 默认翻转为 **true**（只被 @ 时响应，与团队成员相反）；团队+bot 共享前缀的混合 `configure` 中，共享设置的默认一律取排序最前的**团队** profile（bot 排序在前、且其 .env 已有 true 也不会带给全队），每个 standalone bot 单独再问一次该键（默认 true），互不串默认
+- 🧹 团队命令不再误伤：`verify` 对 standalone 跳过 open_id 名单检查（"standalone bot — no roster expected"），对使用 roster-free `bot` 模板的**团队成员**同样跳过（"roster-free bot template — no roster expected"——其 SOUL 无【飞书@方式】，collect-ids 永远无法回填，不豁免则该团队 verify 永久失败）；`collect-ids`、`add/remove-member` 的名单重建与 open_id 收获、`init` 重跑的磁盘成员并集扫描均自动忽略 standalone（即使它与某团队共享前缀）；`init` 重跑时**被选中角色/coordinator 的 profile 若是 standalone bot 或元数据不可读则 fail-closed 跳过**（不覆盖其 SOUL/元数据、不进渲染名单，隐藏的 removed 标记也不会被复活）；`destroy` 永不删除共享前缀的 standalone bot（`--force` 也不删，仅提示手动清理）
+- 🛡️ `.hermes-team.json` 存在但损坏（非 JSON/非对象/不可读）时不再被当作"无元数据"：`destroy`/`init` 并集扫描/`add/remove-member` 名单重建一律 fail-closed（跳过并警告，损坏文件可能藏着 standalone/removed 标记）；`collect-ids` 同样跳过（损坏 profile 不得按 legacy 后缀并入 name→open_id 全局映射、以其 per-app 隔离的 id 覆盖队友真实 id）；`configure` 按 bot 对待（警告 + `REQUIRE_MENTION` 默认 true + 不作共享设置参考）；`verify` 新增逐 profile 元数据检查（损坏即失败并指明原因，不再只剩被误读的下游症状）；`read_team_metadata` 容错语义不变、新增 `team_metadata_corrupt()` 供判定
+- 🛡️ `new-bot` 事务性：SOUL 先渲染后建 profile（模板报错不再留下半建 profile 挡住重试），`--dry-run` 也先渲染一遍（无副作用）以暴露模板错误、不再给出假阳性预览；创建成功后清理 `profiles/.deleted/<name>` 墓碑（与 init/add-member 一致）；`--dry-run` 不再交互询问缺失的 `--description`（用占位符展示，CI/非 TTY 不再 Abort）；省略 `--template` 时默认模板直接取打包的 `bot.md.j2`（不再被 cwd 下同名 `bot` 文件遮蔽，显式路径仍按 cwd 解析）；`--display-name`/`--description` 非法时按字段名报错（不再误报 "Invalid template"）
+- 🔒 **跨前缀隔离**：`list_team_profiles` 的前缀匹配先收紧为 `名字 == prefix 或以 prefix- 开头`（修复 `team`/`teamq` 这类字符串前缀互相吞并对方团队 profile），再对**带元数据的 profile 按其记录的 `prefix` 精确匹配**（`team`/`team-extra` 这类 dash 嵌套前缀仅靠名字无法区分）；无元数据/未记录 prefix 的 profile 回退名字匹配但**fail-closed**——前缀边界之外还带 `-` 的名字（legacy `team-extra-pm` 查询 `team`）无法归属即排除并在 destroy/collect-ids/add/remove-member/init 中说明原因（最长前缀一侧仍可操作；重跑 init 记录 prefix 即消除歧义）；`init` 对名字撞上他队成员（元数据记录了别的 prefix，**或**无记录且名字越过前缀边界的歧义名）的既有 profile fail-closed 跳过、绝不改写其 SOUL/元数据（此前会静默把对方成员/歧义 legacy profile 篡改为本队）；`add-member` 复用既有 profile 前先校验其记录的 prefix（他队 removed 成员不再被『Re-using kept profile』接手）；init 子集重跑在团队身份（团队名/总管名/hub↔coordinator）变更时对未选中成员一并**重渲染 SOUL**（模板可恢复时，收获的 open_id 照常回灌；模板失效则警告并指明真实修法——旧总管占位符 collect-ids 永远无法回填，此前是 verify 永久失败的死胡同）；所有 `--prefix` 入口拒绝空/纯空白值（空前缀会命中所有团队，`remove-member --prefix ''` 曾计划删除他队 profile）
+- 🔐 凭证文件权限：`write_env` 新建 `.env` 一律 0600（不受 umask 影响），重写已存在的组/其他可读 `.env` 时收紧到 0600 并在 `configure` 输出中提示（App Secret 不再对同机其他用户可读）
+- 🗑️ `destroy`：删除目录失败（OSError）时干净中止并说明（与 `remove-member` 一致，不再裸 traceback）；删除成功后写 `profiles/.deleted/<name>` 墓碑（与 `remove-member`/Hermes 删除语义统一，重 init 自动清理）
+- 🔁 `init` 重跑不再破坏线上 @ 提及：重渲染前先收获现有 SOUL 的真实 open_id、渲染后回灌（与 add/remove-member 同一保证）；被并入新名单的磁盘成员其元数据 team/prefix/hub 同步刷新（否则下次 add/remove-member 按陈旧元数据把 SOUL 翻回旧团队名/旧总管）
+- ✅ `verify` 的 open_id 检查按名单逐个 <at> 标签校验：任一非豁免占位符即失败并报出成员名（此前只要存在任一真实 id 就放行，add-member 后新成员无法被 @ 也 ALL PASS）；仅豁免**按名称**识别的永久占位——主人行（名「主人」，保留名）与 render-only 总管（按本 profile 元数据 hub 的名称；无 hub 记录的 legacy 团队豁免内置 M总；`"hub": null` 不豁免），不按占位 ID 豁免（key 恰为 coordinator/owner 的真实成员占位符同样是 `ou_xxx_<key>`，按 ID 豁免会永远放过不可 @ 的成员）；占位符识别的字符类放宽到 `[^"]*`（dash key 如 `ou_xxx_front-end` 此前不可见）；失败明细只列前 3 个名字、其余计入 `(+N more)`；可读但为空的 `~/.hermes/.env` 不再判为失败（无 App ID 即无从遮蔽查重；`start` 的同款告警同步改为仅真不可读时提示修权限）
+- 🩹 `add/remove-member`：成员元数据**记录过**的模板失效（外部文件被删/内置名移除）时只补丁【飞书@方式】、绝不回退内置模板重渲染覆盖手写人设（仅"从未记录模板"的旧团队才回退内置）；元数据 `"hub": null`（coordinator/无总管团队的明确声明）不再被注入 legacy M总（仅完全没有 hub 记录的纯 legacy 团队保留 M总 回退）
+- 🧹 其他：`collect-ids` 豁免 roster-free `bot` 模板成员（与 `verify` 口径一致，不再计入失败并给出无从执行的手填建议）；`new-bot` 拒绝保留名 `default`（Hermes 默认 profile 不在 profiles/ 下，建了也隐形）；所有打印的下一步命令对含空格 prefix 做 shell 引用（shlex.quote）；删除全仓零引用的死模板 `env.j2`/`config.yaml.j2`；`gateway_state.json` 读取显式 utf-8（C locale 下非 ASCII 记录不再被吞成"网关未运行"）；README doctor 章节与 CHANGELOG 0.3.0 的 `--fix` 描述改为实情、中文 README 移除从未发布的 Skill 宣传、README_EN 补齐 0.8.0 表述、示例改用 `init --config`
+- 🧹 名单不变量补齐：`_load_roster`（add/remove-member）与 init 的磁盘并集同一规则——**多个 coordinator=true 一律 fail-closed 报错**（任选其一会让 init 与 add/remove-member 各自领不同的总管、把全队 SOUL 在两者间翻转）、key/名称重复直接报错（此前 add-member 会渲出多条相同 @ 行/多份总管）；config 声明总管时磁盘残留 coordinator profile 同样报错并点名（先清理再重跑）；磁盘 coordinator 名称纳入保留名；`.env` 属主无写位（如 0400）时写入前补齐 u+w（此前 configure 答完全部提问后在写盘处裸 PermissionError），写盘 OSError 一律转干净报错并指明 profile
+- 📚 README/README_EN/CHANGELOG 同步；测试 198 → 275
+
 ## [0.7.0] - 2026-10-20
 
 ### 🪄 配置向导（new-config）
@@ -77,7 +100,7 @@ Hermes 自 0.19 起默认使用 multiplexed gateway：**单个 host 网关进程
 ### 🔧 工程化与健壮性
 
 **新增功能：**
-- 🩺 `hermes-team doctor` 命令 — 诊断配置问题，支持 `--fix` 自动修复
+- 🩺 `hermes-team doctor` 命令 — 检查环境依赖与就绪状态（无参数；此前文档宣称的 `--prefix`/`--fix` 选项从未实现，v0.4.0 起增加 Hermes 版本检查并在存在失败项时以非 0 退出码结束）
 - 💥 `hermes-team destroy` 命令 — 清理团队（停止 Gateway、删除 Profile）
 - 📄 `CONTRIBUTING.md` — 贡献指南，包含开发环境搭建和 PR 流程
 

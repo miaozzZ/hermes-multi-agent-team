@@ -8,6 +8,7 @@ once after validating that every team profile has its own Feishu credentials.
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -17,7 +18,7 @@ import click
 from hermes_multi_agent_team.utils.gateway import find_hermes_bin, get_hermes_version
 from hermes_multi_agent_team.utils.profile import (
     DEFAULT_PROFILE_ENV_LABEL,
-    get_hermes_home,
+    default_env_unreadable,
     list_all_profile_names,
     list_team_profiles,
     profile_served_by_host,
@@ -80,9 +81,13 @@ def _validate_team_credentials(prefix: str, profiles: list[str]) -> list[str]:
     default_app_id = read_default_env().get("FEISHU_APP_ID")
     if default_app_id:
         app_owner[default_app_id] = DEFAULT_PROFILE_ENV_LABEL
-    elif (get_hermes_home() / ".env").exists():
+    elif default_env_unreadable():
+        # Only a file that exists but CANNOT be read (permissions/encoding)
+        # blinds the scan. A readable file without FEISHU_APP_ID (empty,
+        # comments-only, model keys only) has no App ID and hides nothing —
+        # same verdict verify reaches via the same helper.
         click.echo(
-            "  ⚠️  ~/.hermes/.env exists but is unreadable or empty — its App ID is "
+            "  ⚠️  ~/.hermes/.env exists but is unreadable — its App ID is "
             "NOT included in the uniqueness scan. Fix its permissions/encoding."
         )
 
@@ -245,5 +250,5 @@ def start_team(prefix: str, dry_run: bool, standalone: bool = False) -> None:
 
     click.echo("\n📋 Next steps:")
     click.echo("   1. Wait ~30 seconds for connections to establish")
-    click.echo(f"   2. hermes-team collect-ids --prefix {prefix}")
-    click.echo(f"   3. hermes-team verify --prefix {prefix}")
+    click.echo(f"   2. hermes-team collect-ids --prefix {shlex.quote(prefix)}")
+    click.echo(f"   3. hermes-team verify --prefix {shlex.quote(prefix)}")

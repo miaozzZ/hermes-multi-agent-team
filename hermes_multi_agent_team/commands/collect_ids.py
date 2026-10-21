@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shlex
+
 import click
 
 from hermes_multi_agent_team.utils.open_id import (
@@ -10,9 +12,12 @@ from hermes_multi_agent_team.utils.open_id import (
 )
 from hermes_multi_agent_team.utils.profile import (
     get_profile_dir,
+    is_standalone_profile,
+    list_name_ambiguous_profiles,
     list_team_profiles,
     read_soul,
     read_team_metadata,
+    team_metadata_corrupt,
 )
 
 # Legacy fallback for teams created before per-profile metadata existed:
@@ -45,6 +50,15 @@ def _agent_name_for_profile(profile_name: str) -> str | None:
 def collect_team_ids(prefix: str) -> None:
     """Auto-extract Feishu open_ids from gateway logs and update SOUL.md."""
     profiles = list_team_profiles(prefix)
+    # Legacy profiles whose names could belong to a LONGER prefix are
+    # excluded from the listing — their ids must not be merged into this
+    # team's mapping nor their SOULs rewritten; say why instead of silence.
+    for name in list_name_ambiguous_profiles(prefix):
+        click.echo(
+            f"  ⚠️  {name}: name matches '{prefix}-…' but carries no recorded prefix — "
+            f"it may belong to team '{name.rsplit('-', 1)[0]}'; skipped. Re-init it "
+            "under its own team to record the prefix and remove the ambiguity."
+        )
     # Profiles kept on disk via `remove-member --keep-profile` carry a
     # "removed" marker: they are no longer team members, so their logs must
     # not feed the name→open_id mapping nor their SOULs be rewritten.
@@ -56,6 +70,27 @@ def collect_team_ids(prefix: str) -> None:
         )
 
     click.echo(f"\n🔍 Collecting open_ids from {len(profiles)} profile(s)")
+
+    # Standalone bots (new-bot) carry no roster; they are not team members.
+    # Profiles with unreadable metadata fail closed into the same skip: the
+    # corrupt file may hide a standalone marker, and — worse — the profile
+    # would be classified as a legacy member by its suffix, feeding ITS app's
+    # open_ids into the global mapping and overwriting teammates' real ids
+    # (open_ids are per-app isolated).
+    standalone = [p for p in profiles if is_standalone_profile(p)]
+    corrupt = [p for p in profiles if p not in standalone and team_metadata_corrupt(p)]
+    for name in standalone:
+        click.echo(f"  ⏭️  {name}: standalone bot, skipping")
+    for name in corrupt:
+        click.echo(
+            f"  ⚠️  {name}: unreadable .hermes-team.json — skipping (fix the file or "
+            "remove the profile)"
+        )
+    skipped = set(standalone) | set(corrupt)
+    profiles = [p for p in profiles if p not in skipped]
+    if not profiles:
+        click.echo("\nℹ️  No team profiles with this prefix — nothing to collect.")
+        return
     click.echo()
 
     # First pass: collect all bot and user open_ids from all profiles
@@ -118,9 +153,21 @@ def collect_team_ids(prefix: str) -> None:
 
     # Second pass: update SOUL.md in each profile
     click.echo("\n📝 Updating SOUL.md files...")
+    # Team members rendered from the roster-free bot template ("template":
+    # "bot" in a team config / add-member) have NO 【飞书@方式】 section by
+    # design — collect-ids can never fill anything there, so counting them as
+    # "could not be updated" (with a "manually set open_ids" tip that has no
+    # roster to apply to) contradicts verify, which exempts them the same
+    # way. Their bot id above still feeds their teammates' @-lines.
+    roster_free = [p for p in profiles if read_team_metadata(p).get("template") == "bot.md.j2"]
+    for name in roster_free:
+        click.echo(
+            f"  ⏭️  {name}: roster-free bot template — no 【飞书@方式】 section, nothing to fill"
+        )
+    targets = [p for p in profiles if p not in set(roster_free)]
     updated_count = 0
 
-    for profile_name in profiles:
+    for profile_name in targets:
         soul_content = read_soul(profile_name)
         if not soul_content:
             click.echo(f"  ⚠️  {profile_name}: no SOUL.md found")
@@ -140,11 +187,11 @@ def collect_team_ids(prefix: str) -> None:
         else:
             click.echo(f"  ⚠️  {profile_name}: failed to update SOUL.md")
 
-    click.echo(f"\n✅ Done! Updated {updated_count}/{len(profiles)} SOUL.md files")
+    click.echo(f"\n✅ Done! Updated {updated_count}/{len(targets)} SOUL.md files")
 
-    if updated_count < len(profiles):
-        missing = len(profiles) - updated_count
+    if updated_count < len(targets):
+        missing = len(targets) - updated_count
         click.echo(f"   ⚠️  {missing} profile(s) could not be updated")
         click.echo("   You may need to manually set open_ids in their SOUL.md")
 
-    click.echo(f"\n📋 Next step: hermes-team verify --prefix {prefix}")
+    click.echo(f"\n📋 Next step: hermes-team verify --prefix {shlex.quote(prefix)}")

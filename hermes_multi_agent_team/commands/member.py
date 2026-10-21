@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,7 @@ from hermes_multi_agent_team.commands.init import (
     get_jinja_env,
     get_templates_dir,
     render_soul,
+    resolve_recorded_template,
     run_hermes,
 )
 from hermes_multi_agent_team.team_config import (
@@ -45,16 +47,19 @@ from hermes_multi_agent_team.team_config import (
     make_role_spec,
 )
 from hermes_multi_agent_team.utils.gateway import find_hermes_bin
-from hermes_multi_agent_team.utils.open_id import harvest_open_ids, update_soul_md_open_ids
+from hermes_multi_agent_team.utils.open_id import harvest_team_open_ids, update_soul_md_open_ids
 from hermes_multi_agent_team.utils.profile import (
     TEAM_METADATA_FILENAME,
     get_profile_dir,
     get_profiles_dir,
+    is_standalone_profile,
+    list_name_ambiguous_profiles,
     list_team_profiles,
     profile_exists,
     read_soul,
     read_team_metadata,
     remove_tombstone,
+    team_metadata_corrupt,
 )
 
 # Every pre-metadata init (v0.4 and earlier) rendered this hub entry into all
@@ -92,28 +97,30 @@ class Member:
         }
 
 
-def _resolve_recorded_template(ref: object) -> tuple[str | None, Path | None]:
-    """Resolve the 'template' field recorded in metadata at init/add time.
-
-    Recorded values are either a bundled template name ("pm.md.j2") or an
-    absolute path to an external file. Unresolvable → (None, None) and the
-    caller falls back to the key's builtin template, then to patch-only.
-    """
-    if not isinstance(ref, str) or not ref.strip():
-        return None, None
-    candidate = Path(ref)
-    if candidate.is_absolute():
-        return (str(candidate), candidate) if candidate.is_file() else (None, None)
-    if (get_templates_dir() / ref).is_file():
-        return ref, None
-    return None, None
+# Moved to init.py (which owns get_templates_dir and is the module member.py
+# imports from): shared by member.py's roster rebuild and init's on-disk
+# re-render, with the two-case semantics documented there.
+_resolve_recorded_template = resolve_recorded_template
 
 
 def _member_from_metadata(profile_name: str, meta: dict) -> Member:
-    template_name, template_path = _resolve_recorded_template(meta.get("template"))
+    recorded_template = meta.get("template")
+    template_name, template_path = _resolve_recorded_template(recorded_template)
     key = str(meta.get("key") or "")
-    if template_name is None and template_path is None:
+    if (
+        template_name is None
+        and template_path is None
+        and not (isinstance(recorded_template, str) and recorded_template.strip())
+    ):
+        # Metadata recorded NO template at all (pre-0.6 teams): the key's
+        # builtin template is the documented fallback.
         template_name = builtin_template_for_key(key)
+    # A template that WAS recorded but no longer resolves (external file
+    # deleted, bundled name removed) deliberately stays (None, None):
+    # _template_renderable → False → only the 【飞书@方式】 section is
+    # patched. Falling back to the builtin template here would re-render the
+    # member's hand-written persona away — the opposite of the promise in
+    # this module's docstring ("自定义模板文件已不存在——不覆盖手写人设").
     return Member(
         key=key,
         name=str(meta.get("name") or ""),
@@ -182,17 +189,46 @@ def _recover_team_name(members: list[Member]) -> str | None:
 def _load_roster(prefix: str, profiles: list[str]) -> tuple[str, list[Member], Member | None]:
     """Rebuild (team_name, members, render-only hub) from the profiles on disk."""
     builtin = builtin_team_config()
+    # Legacy profiles excluded from `profiles` because their names could
+    # belong to a longer prefix: say why, or add/remove-member silently
+    # building a roster without them looks like data loss.
+    for name in list_name_ambiguous_profiles(prefix):
+        click.echo(
+            f"  ⚠️  {name}: name matches '{prefix}-…' but carries no recorded prefix — "
+            f"it may belong to team '{name.rsplit('-', 1)[0]}'; excluded from the roster. "
+            "Re-init it under its own team to record the prefix and remove the ambiguity."
+        )
     members: list[Member] = []
     hub: Member | None = None
     team_name: str | None = None
     legacy = False
+    # Whether ANY metadata-carrying profile records the "hub" key — even as
+    # null. A team whose init/add-member wrote "hub": null deliberately has
+    # NO render-only hub (coordinator team or hub-less config); injecting the
+    # legacy M总 into it because some OTHER profile predates metadata would
+    # render a hub the team never declared. Only teams with no hub record at
+    # all (pure pre-metadata legacy teams) get the M总 fallback.
+    hub_declared = False
 
     for profile_name in profiles:
+        if team_metadata_corrupt(profile_name):
+            # Fail closed: an unreadable metadata file hides any "standalone"
+            # or "removed" marker it carried — classifying it as a legacy
+            # (no-metadata) member would write a bot into every roster.
+            click.echo(
+                f"  ⚠️  {profile_name}: unreadable {TEAM_METADATA_FILENAME} — skipped "
+                "(fix the file or remove the profile)"
+            )
+            continue
         meta = read_team_metadata(profile_name)
         if meta.get("removed"):
             # Kept on disk by `remove-member --keep-profile` but no longer a
             # team member: skip it, or the departed member would be
             # re-rendered back into every SOUL on the next add/remove.
+            continue
+        if is_standalone_profile(profile_name):
+            # A new-bot agent that happens to share the team's prefix is not
+            # a team member either.
             continue
         if not meta:
             # Team created before metadata existed: classify by profile
@@ -231,9 +267,59 @@ def _load_roster(prefix: str, profiles: list[str]) -> tuple[str, list[Member], M
             )
             continue
         team_name = team_name or (str(meta["team"]) if meta.get("team") else None)
-        if hub is None:
-            hub = _hub_from_metadata(meta.get("hub"))
+        if "hub" in meta:
+            # The key itself is the declaration (null = "no hub", a dict = the
+            # hub); scan every profile so a hub hidden behind a null-first
+            # ordering is still found in mixed old/new states.
+            hub_declared = True
+            if hub is None:
+                hub = _hub_from_metadata(meta.get("hub"))
         members.append(_member_from_metadata(profile_name, meta))
+
+    # Same roster invariants init enforces on its on-disk union scan — init
+    # and add/remove-member must not build different (or non-unique) rosters
+    # from one disk state:
+    # 1. ONE coordinator: several coordinator=true profiles (e.g. left by
+    #    re-running init with different configs) would render N 总管 entries
+    #    into every SOUL. Picking any one of them silently would also FLIP
+    #    the roster between init runs (init's config coordinator wins there,
+    #    the sorted-first wins here) — fail closed instead: the disk state
+    #    itself is inconsistent and must be cleaned before any roster change.
+    coordinators = [m for m in members if m.coordinator]
+    if len(coordinators) > 1:
+        listed = ", ".join(f"{c.profile_name} ({c.name})" for c in coordinators)
+        raise click.ClickException(
+            f"❌ Multiple coordinator profiles on disk: {listed} — a roster renders "
+            "exactly one 总管. Remove the extras (remove-member --keep-profile or "
+            "rm -rf) or re-init with a single coordinator config, then retry."
+        )
+    # 2. Unique keys and unique names (init raises the same error): duplicate
+    #    keys mean two profiles fight over one <prefix>-<key>; duplicate
+    #    names make collect-ids' name→open_id mapping ambiguous and render
+    #    identical @-lines.
+    seen_keys: dict[str, str] = {}
+    seen_names: dict[str, str] = {}
+    for m in members:
+        lowered = m.key.lower()
+        if lowered in seen_keys:
+            raise click.ClickException(
+                f"❌ Duplicate role key '{m.key}' on disk: {seen_keys[lowered]} and "
+                f"{m.profile_name} — remove or fix one of them before changing the roster"
+            )
+        seen_keys[lowered] = str(m.profile_name)
+        if m.name in seen_names:
+            raise click.ClickException(
+                f"❌ Duplicate member name '{m.name}' on disk: {seen_names[m.name]} and "
+                f"{m.profile_name} — names must be unique (collect-ids matches SOUL.md "
+                "@tags by name)"
+            )
+        seen_names[m.name] = str(m.profile_name)
+    if hub is not None and hub.name in seen_names:
+        raise click.ClickException(
+            f"❌ Render-only hub name '{hub.name}' duplicates the member of "
+            f"{seen_names[hub.name]} — names must be unique (collect-ids matches "
+            "SOUL.md @tags by name)"
+        )
 
     # A declared coordinator (metadata coordinator=true) beats every hub —
     # recorded in metadata or the legacy fallback. Keeping both would render
@@ -246,9 +332,9 @@ def _load_roster(prefix: str, profiles: list[str]) -> tuple[str, list[Member], M
                 "declared coordinator — keeping both would render two 总管 entries"
             )
         hub = None
-    elif legacy and hub is None:
-        # The legacy M总 fallback is only for pre-metadata teams that never
-        # declared a coordinator.
+    elif legacy and hub is None and not hub_declared:
+        # The legacy M总 fallback is ONLY for pre-metadata teams that never
+        # declared a hub (directly or via "hub": null) and no coordinator.
         hub = Member(
             key=_LEGACY_HUB["key"],
             name=_LEGACY_HUB["name"],
@@ -278,6 +364,9 @@ def _context_for(member: Member, team_name: str, team_members: list[dict[str, st
         "name": member.name,
         "nickname": member.nickname,
         "role": member.role,
+        # Team renders of the bundled bot template ("template": "bot") read a
+        # description slot — same context shape init's renders get.
+        "description": member.role,
         "team_name": team_name,
         "team_members": team_members,
         "owner_open_id": "ou_xxx_owner",
@@ -335,22 +424,10 @@ def _patch_at_section(soul_path: Path, add_member: Member | None, remove_names: 
     return True
 
 
-def _harvest_team_ids(profiles: list[str]) -> dict[str, str]:
-    """name → open_id from every member's SOUL <at> tags, placeholders skipped.
-
-    Profiles marked removed (kept via --keep-profile) are skipped, like in
-    _load_roster and collect-ids: a departed member's SOUL may carry stale
-    ids, and the last-profile-wins merge would push them back into every
-    remaining SOUL during the re-render.
-    """
-    harvested: dict[str, str] = {}
-    for profile_name in profiles:
-        if read_team_metadata(profile_name).get("removed"):
-            continue
-        soul = read_soul(profile_name)
-        if soul:
-            harvested.update(harvest_open_ids(soul))
-    return harvested
+# Shared with init (re-runs harvest before re-rendering): lives in
+# utils/open_id.py next to harvest_open_ids, so neither command module
+# imports the other for it.
+_harvest_team_ids = harvest_team_open_ids
 
 
 def _rebuild_souls(
@@ -471,12 +548,27 @@ def add_member(
     new_profile = f"{prefix}-{spec.key}"
     # A pre-existing directory is only acceptable when it is a profile kept
     # via `remove-member --keep-profile` re-joining under the same key: its
-    # metadata carries the "removed" marker and gets overwritten below.
+    # metadata carries the "removed" marker AND still records THIS team's
+    # prefix — a removed member of ANOTHER team (dash-nested name collision,
+    # e.g. team-extra's pm2 seen as key "extra-pm2" of team) must not be
+    # re-used and overwritten here.
     rejoining = profile_exists(new_profile)
-    if rejoining and not read_team_metadata(new_profile).get("removed"):
-        raise click.ClickException(
-            f"❌ Profile '{new_profile}' already exists but is not part of team '{prefix}'"
+    if rejoining:
+        existing_meta = read_team_metadata(new_profile)
+        recorded_prefix = existing_meta.get("prefix")
+        is_foreign = (
+            isinstance(recorded_prefix, str) and recorded_prefix and recorded_prefix != prefix
         )
+        if is_foreign:
+            raise click.ClickException(
+                f"❌ Profile '{new_profile}' belongs to team prefix '{recorded_prefix}' "
+                f"(recorded in {TEAM_METADATA_FILENAME}) — it cannot re-join team "
+                f"'{prefix}'. Remove that team's profile first or pick another key/prefix."
+            )
+        if not existing_meta.get("removed"):
+            raise click.ClickException(
+                f"❌ Profile '{new_profile}' already exists but is not part of team '{prefix}'"
+            )
 
     new_member = Member(
         key=spec.key,
@@ -519,6 +611,22 @@ def add_member(
     if not dry_run:
         roster = _roster_order(members + [new_member], hub)
         team_members = [m.as_team_member() for m in roster]
+
+        def _cleanup_orphan() -> None:
+            # A freshly created profile dir must not be left behind: it would
+            # block a retry with "already exists ... not part of team" once
+            # the failure is fixed. (A re-joining kept profile keeps its
+            # directory and its "removed" marker — nothing was overwritten.)
+            if rejoining:
+                return
+            profile_dir = get_profile_dir(new_profile)
+            shutil.rmtree(profile_dir, ignore_errors=True)
+            if profile_dir.exists():
+                click.echo(
+                    f"  ⚠️  Could not remove just-created profile dir '{new_profile}' — "
+                    "delete it manually before retrying"
+                )
+
         try:
             content = render_soul(
                 get_jinja_env(),
@@ -527,42 +635,41 @@ def add_member(
                 _context_for(new_member, team_name, team_members),
             )
         except Exception as e:
-            # A freshly created profile dir must not be left behind: it would
-            # block a retry with "already exists ... not part of team" once
-            # the template is fixed. (A re-joining kept profile keeps its
-            # directory and its "removed" marker — nothing was overwritten.)
-            if not rejoining:
-                profile_dir = get_profile_dir(new_profile)
-                shutil.rmtree(profile_dir, ignore_errors=True)
-                if profile_dir.exists():
-                    click.echo(
-                        f"  ⚠️  Could not remove just-created profile dir '{new_profile}' — "
-                        "delete it manually before retrying"
-                    )
+            _cleanup_orphan()
             raise click.ClickException(f"❌ Failed to render SOUL for {spec.name}: {e}") from e
-        profile_dir = get_profile_dir(new_profile)
-        profile_dir.mkdir(parents=True, exist_ok=True)
-        soul_path = profile_dir / "SOUL.md"
-        soul_path.write_text(content, encoding="utf-8")
-        update_soul_md_open_ids(soul_path, harvested)
-        metadata = {
-            "key": spec.key,
-            "name": spec.name,
-            "nickname": spec.nickname,
-            "role": spec.role,
-            "coordinator": False,
-            "team": team_name,
-            "prefix": prefix,
-            "template": (
-                str(spec.template_path) if spec.template_path is not None else spec.template
-            ),
-            # Persist the render-only hub (whatever its origin: metadata or
-            # the legacy fallback) so future roster rebuilds keep it.
-            "hub": _hub_as_metadata(hub),
-        }
-        (profile_dir / TEAM_METADATA_FILENAME).write_text(
-            json.dumps(metadata, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
+        # SOUL + metadata writes share the render failure's cleanup: an
+        # OSError here (unwritable directory, full disk) used to escape as a
+        # bare traceback AND leave a config.yaml-only orphan profile dir.
+        try:
+            profile_dir = get_profile_dir(new_profile)
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            soul_path = profile_dir / "SOUL.md"
+            soul_path.write_text(content, encoding="utf-8")
+            update_soul_md_open_ids(soul_path, harvested)
+            metadata = {
+                "key": spec.key,
+                "name": spec.name,
+                "nickname": spec.nickname,
+                "role": spec.role,
+                "coordinator": False,
+                "team": team_name,
+                "prefix": prefix,
+                "template": (
+                    str(spec.template_path) if spec.template_path is not None else spec.template
+                ),
+                # Persist the render-only hub (whatever its origin: metadata or
+                # the legacy fallback) so future roster rebuilds keep it.
+                "hub": _hub_as_metadata(hub),
+            }
+            (profile_dir / TEAM_METADATA_FILENAME).write_text(
+                json.dumps(metadata, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+        except OSError as e:
+            _cleanup_orphan()
+            raise click.ClickException(
+                f"❌ Could not write SOUL/metadata for {new_profile}: {e}\n"
+                "   Check the profile directory's permissions/free space and retry."
+            ) from e
         click.echo(f"  ✅ {new_profile}: SOUL.md + metadata written")
         # A tombstone from an earlier remove-member (delete mode) would keep
         # hiding the freshly re-added profile from list_team_profiles and
@@ -593,13 +700,17 @@ def add_member(
     click.echo()
     click.echo(f"✅ Member added; {updated} teammate SOUL(s) updated")
     click.echo("📋 Next steps:")
+    # shlex.quote: prefixes may contain spaces (validate_prefix allows them) —
+    # copy-pasting an unquoted command would split into arguments.
     click.echo(
-        f"   1. hermes-team configure --prefix {prefix}   (new member needs its own Feishu app)"
+        f"   1. hermes-team configure --prefix {shlex.quote(prefix)}   (new member needs its own Feishu app)"
     )
     click.echo("   2. Add the new bot to the Feishu group")
     click.echo("   3. Wait ~30s (host gateway rescans profiles automatically)")
-    click.echo(f"   4. hermes-team collect-ids --prefix {prefix}  (fills the new member's open_id)")
-    click.echo(f"   5. hermes-team verify --prefix {prefix}")
+    click.echo(
+        f"   4. hermes-team collect-ids --prefix {shlex.quote(prefix)}  (fills the new member's open_id)"
+    )
+    click.echo(f"   5. hermes-team verify --prefix {shlex.quote(prefix)}")
 
 
 def remove_member(

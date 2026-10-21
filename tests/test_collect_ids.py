@@ -113,3 +113,47 @@ def test_collect_ids_skips_profiles_removed_from_team(tmp_hermes_home: Path):
     # The removed profile's SOUL was not rewritten.
     fe_soul = (tmp_hermes_home / "profiles" / "team-fe" / "SOUL.md").read_text()
     assert 'user_id="ou_xxx_placeholder">F仔' in fe_soul
+
+
+def test_collect_ids_skips_roster_free_bot_template_members(tmp_hermes_home: Path):
+    """A team member rendered from the roster-free 'bot' template has no
+    【飞书@方式】 section by design: it must be exempted like verify does (not
+    warned at, not counted as 'could not be updated', no manual-fill tip that
+    has no roster to apply to) — while its bot id still feeds teammates'
+    @-lines."""
+    # Normal member: roster SOUL listing both itself and the bot member.
+    _make_profile(
+        tmp_hermes_home,
+        "team-pm",
+        metadata={"key": "pm", "name": "P酱", "coordinator": False},
+        log_lines=["2026-10-20 10:00:00 msg sender=bot:ou_botpm name=P酱"],
+        soul_names=["P酱", "阿写"],
+    )
+    # Roster-free bot-template member: SOUL without the 【飞书@方式】 section.
+    bot = tmp_hermes_home / "profiles" / "team-writer"
+    (bot / "logs").mkdir(parents=True)
+    (bot / "logs" / "gateway.log").write_text(
+        "2026-10-20 10:00:01 msg sender=bot:ou_botwriter name=阿写\n", encoding="utf-8"
+    )
+    (bot / ".hermes-team.json").write_text(
+        json.dumps(
+            {"key": "writer", "name": "阿写", "coordinator": False, "template": "bot.md.j2"},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (bot / "SOUL.md").write_text("你是阿写，一个内容创作。\n", encoding="utf-8")
+
+    result = CliRunner().invoke(cli, ["collect-ids", "--prefix", "team"])
+    assert result.exit_code == 0, result.output
+
+    # The bot member's id was collected and filled into the teammate's SOUL…
+    assert "阿写 → ou_botwriter" in result.output
+    pm_soul = (tmp_hermes_home / "profiles" / "team-pm" / "SOUL.md").read_text()
+    assert 'user_id="ou_botwriter">阿写' in pm_soul
+
+    # …but its own profile was exempted, not failed.
+    assert "roster-free bot template" in result.output
+    assert "could not be updated" not in result.output
+    assert "manually set open_ids" not in result.output
+    assert "Updated 1/1 SOUL.md files" in result.output

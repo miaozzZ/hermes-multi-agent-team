@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import sys
 from importlib import resources
 from pathlib import Path
 
 import click
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+from jinja2 import Environment, FileSystemLoader, StrictUndefined, Undefined, select_autoescape
 
 from hermes_multi_agent_team.commands.collect_ids import ROLE_NAME_MAP
 from hermes_multi_agent_team.team_config import (
@@ -21,13 +22,18 @@ from hermes_multi_agent_team.team_config import (
     validate_prefix,
 )
 from hermes_multi_agent_team.utils.gateway import find_hermes_bin
+from hermes_multi_agent_team.utils.open_id import harvest_team_open_ids, update_soul_md_open_ids
 from hermes_multi_agent_team.utils.profile import (
     TEAM_METADATA_FILENAME,
+    get_profile_dir,
     get_profiles_dir,
+    is_standalone_profile,
+    list_name_ambiguous_profiles,
     list_team_profiles,
     profile_exists,
     read_team_metadata,
     remove_tombstone,
+    team_metadata_corrupt,
 )
 
 
@@ -41,13 +47,19 @@ def get_templates_dir() -> Path:
         return Path(__file__).resolve().parent.parent / "templates" / "SOUL"
 
 
-def get_jinja_env() -> Environment:
-    """Create a Jinja2 environment for template rendering."""
+def get_jinja_env(strict_undefined: bool = False) -> Environment:
+    """Create a Jinja2 environment for template rendering.
+
+    ``strict_undefined=True`` makes undefined variables (e.g. a custom
+    template referencing team-only vars like ``team_members`` outside a team
+    render) raise instead of silently rendering empty strings.
+    """
     templates_dir = get_templates_dir()
     return Environment(
         loader=FileSystemLoader(str(templates_dir)),
         autoescape=select_autoescape([]),
         keep_trailing_newline=True,
+        undefined=StrictUndefined if strict_undefined else Undefined,
     )
 
 
@@ -60,6 +72,47 @@ def render_soul(
     else:
         template = env.get_template(template_name)
     return template.render(**context)
+
+
+def resolve_recorded_template(ref: object) -> tuple[str | None, Path | None]:
+    """Resolve the 'template' field recorded in metadata at init/add time.
+
+    Recorded values are either a bundled template name ("pm.md.j2") or an
+    absolute path to an external file. A ref that is not a non-blank string
+    (nothing recorded) or that no longer resolves (file deleted, bundled
+    name removed) yields (None, None) — the CALLER decides what that means,
+    and the two cases are deliberately different:
+
+    - nothing recorded → fall back to the key's builtin template (re-render
+      allowed; pre-0.6 teams never had a template field);
+    - recorded but unresolvable → patch-only / no re-render (re-rendering
+      would overwrite the member's hand-written persona).
+
+    Do not "simplify" callers by falling back to the builtin template here
+    for both cases.
+    """
+    if not isinstance(ref, str) or not ref.strip():
+        return None, None
+    candidate = Path(ref)
+    if candidate.is_absolute():
+        return (str(candidate), candidate) if candidate.is_file() else (None, None)
+    if (get_templates_dir() / ref).is_file():
+        return ref, None
+    return None, None
+
+
+def _identity_of(meta: dict) -> tuple:
+    """Comparable (team_name, hub-declaration) signature of a profile's metadata.
+
+    Used to detect a subset re-run that changed the team's identity (team
+    name, hub renamed, hub→coordinator switch): members whose OLD signature
+    differs from the run's new one get their SOULs re-rendered, so SOUL and
+    the refreshed metadata agree. A missing "hub" key ("absent") differs
+    from an explicit null ("null") — the latter is a deliberate declaration.
+    """
+    hub = meta.get("hub")
+    hub_sig = "absent" if "hub" not in meta else json.dumps(hub, sort_keys=True, ensure_ascii=False)
+    return (meta.get("team"), hub_sig)
 
 
 def run_hermes(args: list[str], dry_run: bool = False) -> subprocess.CompletedProcess[str]:
@@ -114,6 +167,7 @@ def _create_profile(
     clone_from: str | None,
     metadata: dict,
     dry_run: bool,
+    harvested_ids: dict[str, str] | None = None,
 ) -> bool:
     """Create one profile (hermes CLI) + SOUL.md + team metadata. True on success."""
     # Check if profile already exists
@@ -135,6 +189,12 @@ def _create_profile(
             profile_dir.mkdir(parents=True, exist_ok=True)
             soul_path = profile_dir / "SOUL.md"
             soul_path.write_text(soul_content, encoding="utf-8")
+            # Re-apply the open_ids harvested from the team's existing SOULs
+            # (see init_team): re-running init must never reset already
+            # collected @-mentions back to placeholders — same guarantee
+            # add/remove-member give. A no-op for a first init (empty map).
+            if harvested_ids:
+                update_soul_md_open_ids(soul_path, harvested_ids)
             metadata_path = profile_dir / TEAM_METADATA_FILENAME
             metadata_path.write_text(
                 json.dumps({**metadata, "team": team_name, "prefix": prefix}, ensure_ascii=False)
@@ -240,30 +300,87 @@ def init_team(
 
     specs = [cfg.role(key) for key in role_keys]
 
-    # Profiles removed via `remove-member --keep-profile` carry a "removed"
-    # marker: re-running init must neither rewrite them nor render them into
-    # teammates' SOULs — otherwise the removal is silently undone (the marker
-    # wiped and the departed member back in every roster).
-    def _was_removed(spec: RoleSpec) -> bool:
+    # A selected role whose existing profile must NOT be re-rendered as a
+    # team member — five fail-closed cases, all detected up front so the
+    # roster/header/loop stay consistent:
+    # - "removed": profiles removed via `remove-member --keep-profile` carry a
+    #   "removed" marker; rewriting SOUL + metadata would silently re-activate
+    #   the departed member in every roster.
+    # - "standalone": the profile is a new-bot agent whose name collides with
+    #   this team's role key; overwriting would erase the bot's persona and
+    #   its standalone marker (and expose it to destroy).
+    # - "foreign": the profile's metadata records ANOTHER team's prefix — the
+    #   name <prefix>-<key> collides with a dash-nested team's member (key
+    #   "extra-pm2" of this team vs the "team-extra" team's "pm2").
+    #   Re-rendering would silently rewrite that team's member (SOUL swapped
+    #   to this roster, metadata prefix/team overwritten) — the same guard
+    #   add-member has ("already exists but is not part of team").
+    # - "ambiguous": no recorded prefix AND the name carries a dash beyond
+    #   this prefix's boundary (legacy "team-extra-pm" selected as key
+    #   "extra-pm" of "team") — the name alone cannot tell this team's
+    #   dash-keyed member from another team's profile, and writing here
+    #   (SOUL + a fresh "prefix": "team" metadata) would claim it silently.
+    # - "corrupt": unreadable metadata hides either marker above — fail
+    #   closed instead of guessing.
+    def _blocked_reason(spec: RoleSpec) -> str | None:
         profile_name = f"{prefix}-{spec.key}"
-        return profile_exists(profile_name) and bool(
-            read_team_metadata(profile_name).get("removed")
-        )
+        if not profile_exists(profile_name):
+            return None
+        if team_metadata_corrupt(profile_name):
+            return "corrupt"
+        meta = read_team_metadata(profile_name)
+        if meta.get("removed"):
+            return "removed"
+        if is_standalone_profile(profile_name):
+            return "standalone"
+        recorded_prefix = meta.get("prefix")
+        if isinstance(recorded_prefix, str) and recorded_prefix and recorded_prefix != prefix:
+            return "foreign"
+        has_recorded_prefix = isinstance(recorded_prefix, str) and bool(recorded_prefix)
+        if (
+            not has_recorded_prefix
+            and profile_name != prefix
+            and (profile_name.rsplit("-", 1)[0] != prefix)
+        ):
+            return "ambiguous"
+        return None
 
-    removed_keys = {
-        spec.key for spec in ([coordinator] if coordinator else []) + specs if _was_removed(spec)
-    }
-    coordinator_removed = coordinator is not None and coordinator.key in removed_keys
+    blocked: dict[str, str] = {}  # role key (lowered) → reason
+    for spec in ([coordinator] if coordinator else []) + specs:
+        reason = _blocked_reason(spec)
+        if reason is not None:
+            blocked[spec.key.lower()] = reason
+    removed_keys = {key for key, reason in blocked.items() if reason == "removed"}
+    coordinator_blocked = coordinator is not None and coordinator.key.lower() in blocked
+    coordinator_removed = (
+        coordinator is not None and blocked.get(coordinator.key.lower()) == "removed"
+    )
 
     click.echo(f"\n🚀 Initializing team '{team_name}' with roles: {', '.join(role_keys)}")
     click.echo(f"   Profile prefix: {prefix}")
-    if coordinator and not coordinator_removed:
+    if coordinator and not coordinator_blocked:
         click.echo(f"   Coordinator: {coordinator.name} → profile: {prefix}-{coordinator.key}")
-    elif coordinator:
+    elif coordinator and coordinator_removed:
         click.echo(
             f"   Coordinator: {coordinator.name} — profile was removed from the team "
             "(remove-member --keep-profile), skipping"
         )
+    elif coordinator and blocked.get(coordinator.key.lower()) == "standalone":
+        click.echo(
+            f"   Coordinator: {coordinator.name} — profile is a standalone bot (new-bot), skipping"
+        )
+    elif coordinator and blocked.get(coordinator.key.lower()) == "foreign":
+        click.echo(
+            f"   Coordinator: {coordinator.name} — profile belongs to another team's "
+            "prefix (see its metadata), skipping"
+        )
+    elif coordinator and blocked.get(coordinator.key.lower()) == "ambiguous":
+        click.echo(
+            f"   Coordinator: {coordinator.name} — profile name is ambiguous (no recorded "
+            "prefix, dash beyond this prefix), skipping"
+        )
+    elif coordinator:
+        click.echo(f"   Coordinator: {coordinator.name} — profile metadata unreadable, skipping")
     elif cfg.hub:
         click.echo(f"   Hub (render-only, no profile): {cfg.hub.name}")
     else:
@@ -289,37 +406,80 @@ def init_team(
     # Names rendered into this run's roster: collect-ids matches SOUL @tags
     # by name, so an on-disk member duplicating one is an error, not a
     # silent second @-line.
-    reserved_names = {spec.name for spec in specs if spec.key not in removed_keys}
-    if coordinator is not None and not coordinator_removed:
+    reserved_names = {spec.name for spec in specs if spec.key.lower() not in blocked}
+    if coordinator is not None and not coordinator_blocked:
         reserved_names.add(coordinator.name)
     elif cfg.hub is not None:
         reserved_names.add(cfg.hub.name)
 
     extra_members: list[dict[str, str]] = []
-    # A profile-backed coordinator left on disk by an earlier config: it
-    # leads the roster when this config declares no coordinator of its own
-    # (same precedence as member.py's _load_roster, which drops recorded
-    # hubs whenever a coordinator=true member exists — keeping both would
-    # have init and add-member flip the roster back and forth).
+    # Profile names of the on-disk roster members that CARRY metadata —
+    # after rendering, their .hermes-team.json team/prefix/hub are refreshed
+    # to this run's values (see below), so the roster-rebuild source of
+    # truth agrees with the SOULs init just re-rendered.
+    roster_metadata_profiles: list[str] = []
+    # Their (team, hub) identity BEFORE the refresh: when the identity
+    # changes, their own SOULs still reference the OLD roster (old hub
+    # @-line, old team name) and are re-rendered after the refresh — see the
+    # re-render pass below the work loop.
+    old_identity: dict[str, tuple] = {}
+    # Profile-backed coordinators left on disk by an earlier config. ONE
+    # 总管 per team: several of them (or one alongside a config-declared
+    # coordinator) is an inconsistent disk state — adjudicated fail-closed
+    # after the scan, because silently keeping the sorted-first would let
+    # init and add/remove-member lead the roster with DIFFERENT coordinators.
+    on_disk_coordinators: list[tuple[str, str]] = []
     on_disk_coordinator: dict[str, str] | None = None
     builtin = builtin_team_config()
+    # Legacy profiles whose names could belong to a LONGER prefix are
+    # excluded from list_team_profiles — excluded here too (their team
+    # membership cannot be attributed without metadata), with the reason.
+    for ambiguous in list_name_ambiguous_profiles(prefix):
+        click.echo(
+            f"   ⚠️  {ambiguous}: name matches '{prefix}-…' but carries no recorded "
+            f"prefix — it may belong to team '{ambiguous.rsplit('-', 1)[0]}'; excluded "
+            "from the roster. Re-init it under its own team to record the prefix."
+        )
     for profile_name in list_team_profiles(prefix):
+        if team_metadata_corrupt(profile_name):
+            # Fail closed: an unreadable metadata file hides any "standalone"
+            # marker it carried — classifying it as a legacy (no-metadata)
+            # member would write a bot into every team roster.
+            click.echo(
+                f"   ⚠️  {profile_name}: unreadable {TEAM_METADATA_FILENAME} — excluded "
+                "from the roster (fix the file or remove the profile)"
+            )
+            continue
         meta = read_team_metadata(profile_name)
         if meta.get("removed"):
             continue  # removed members stand removed
+        if meta.get("standalone"):
+            # A new-bot agent that happens to share the team's prefix is not
+            # a team member either — same guard as collect-ids and member.py's
+            # roster rebuild (checked inline: meta is already loaded here, and
+            # commands.bot cannot be imported without a circular import).
+            continue
         member: dict[str, str] | None = None
         key = ""
         if meta:
             key = str(meta.get("key") or "")
             if key and key.lower() not in known_keys:
                 if meta.get("coordinator"):
-                    if on_disk_coordinator is None:
-                        on_disk_coordinator = {
+                    # Collected and adjudicated after the scan: ONE 总管 per
+                    # team — several coordinator profiles must fail closed
+                    # (see below), and a config-declared coordinator must not
+                    # silently coexist with leftover ones.
+                    on_disk_coordinators.append(
+                        {
+                            "profile": profile_name,
                             "name": str(meta.get("name") or key),
                             "nickname": str(meta.get("nickname") or meta.get("name") or key),
                             "role": str(meta.get("role") or "总管"),
+                            "key": key,
                             "open_id": f"ou_xxx_{key}",
                         }
+                    )
+                    old_identity[profile_name] = _identity_of(meta)
                 else:
                     member = {
                         "name": str(meta.get("name") or key),
@@ -358,12 +518,52 @@ def init_team(
                 "member first."
             )
         extra_members.append(member)
+        if meta:
+            roster_metadata_profiles.append(profile_name)
+            old_identity[profile_name] = _identity_of(meta)
+
+    # ONE 总管 adjudication: a config-declared coordinator must not coexist
+    # with leftover coordinator profiles, and several leftovers are ambiguous
+    # on their own — fail closed BEFORE anything is written. Silently keeping
+    # the sorted-first here would lead this roster with one coordinator while
+    # add/remove-member's rebuild (same rule) errors or leads with another,
+    # flipping every SOUL between 总管s.
+    if on_disk_coordinators:
+        listed = ", ".join(f"{c['profile']} ({c['name']})" for c in on_disk_coordinators)
+        if coordinator is not None:
+            raise click.ClickException(
+                f"❌ The config declares coordinator {coordinator.name}, but coordinator "
+                f"profile(s) already exist on disk: {listed} — remove them first "
+                "(remove-member --keep-profile, or rm -rf the profile directories) so "
+                "exactly one 总管 profile remains, then re-run init."
+            )
+        if len(on_disk_coordinators) > 1:
+            raise click.ClickException(
+                f"❌ Multiple coordinator profiles on disk: {listed} — a roster renders "
+                "exactly one 总管. Remove the extras or re-init with a coordinator "
+                "config declaring one, then retry."
+            )
+        on_disk_coordinator = on_disk_coordinators[0]
+        roster_metadata_profiles.append(on_disk_coordinator["profile"])
 
     if extra_members:
         click.echo(
             f"   Including {len(extra_members)} on-disk member(s) outside this run's "
             f"roles: {', '.join(m['name'] for m in extra_members)}"
         )
+    # The on-disk coordinator's name is as reserved as a declared one — an
+    # extra member sharing it would render two identical-named 总管-adjacent
+    # @-lines and break collect-ids' name→open_id matching. reserved_names
+    # was consumed during the scan, so check the extras here.
+    if on_disk_coordinator is not None:
+        for m in extra_members:
+            if m["name"] == on_disk_coordinator["name"]:
+                raise click.ClickException(
+                    f"❌ On-disk member '{m['name']}' duplicates the on-disk "
+                    f"coordinator's name ({on_disk_coordinator['name']}) — names must "
+                    "be unique (collect-ids matches SOUL.md @tags by name). Rename or "
+                    "remove one of them first."
+                )
     if clone_from:
         click.echo(f"   Cloning from: {clone_from}")
     if dry_run:
@@ -373,17 +573,13 @@ def init_team(
     hermes_bin = find_hermes_bin()
 
     # Build team members list for template rendering: coordinator/hub first,
-    # then this run's roles, then the on-disk extras above.
-    active_specs = [spec for spec in specs if spec.key not in removed_keys]
+    # then this run's roles, then the on-disk extras above. Blocked roles
+    # (removed / standalone / corrupt) are neither rendered into teammates'
+    # rosters nor given a profile write below.
+    active_specs = [spec for spec in specs if spec.key.lower() not in blocked]
     team_members = [spec.as_team_member() for spec in active_specs] + extra_members
-    if coordinator and not coordinator_removed:
+    if coordinator and not coordinator_blocked:
         team_members.insert(0, coordinator.as_team_member())
-        if on_disk_coordinator is not None:
-            click.echo(
-                f"   ⚠️  Ignoring on-disk coordinator {on_disk_coordinator['name']}: "
-                f"the config declares {coordinator.name} — remove or re-declare the "
-                "old coordinator profile"
-            )
     elif on_disk_coordinator is not None:
         team_members.insert(0, on_disk_coordinator)
         click.echo(
@@ -400,6 +596,16 @@ def init_team(
     owner_open_id = "ou_xxx_owner"  # placeholder
     env = get_jinja_env()
 
+    # Harvest the open_ids already collected into the team's existing SOULs
+    # BEFORE any rewrite and re-apply them after each render below: re-running
+    # init re-renders every selected member's SOUL with placeholder ids, which
+    # used to silently break live @-mentions until collect-ids was re-run —
+    # add/remove-member keep this guarantee for roster changes; init now does
+    # too. (harvest_team_open_ids lives in utils/open_id.py precisely so this
+    # is a plain module-level import — member.py imports THIS module at load
+    # time, so importing member back would be a cycle.)
+    harvested_ids = harvest_team_open_ids(list_team_profiles(prefix))
+
     success_count = 0
     fail_count = 0
 
@@ -408,14 +614,18 @@ def init_team(
             "name": spec.name,
             "nickname": spec.nickname,
             "role": spec.role,
+            # The bundled bot template is registered as a team-usable short
+            # name ("template": "bot"); in a team render its description slot
+            # is the member's role text.
+            "description": spec.role,
             "team_name": team_name,
             "team_members": team_members,
             "owner_open_id": owner_open_id,
             "language": "zh",
         }
 
-    # Coordinator profile is created first (it is the team's hub). Removed
-    # members (coordinator included) stay in the list so the skip is announced
+    # Coordinator profile is created first (it is the team's hub). Blocked
+    # roles (coordinator included) stay in the list so the skip is announced
     # and counted; the loop skips them before any processing.
     work: list[tuple[RoleSpec, bool]] = ([(coordinator, True)] if coordinator else []) + [
         (spec, False) for spec in specs
@@ -428,16 +638,66 @@ def init_team(
             f"👤 [{spec.key}] {spec.name} ({spec.role}){coord_label} → profile: {profile_name}"
         )
 
-        # Re-running init must not resurrect a member the user removed with
-        # `remove-member --keep-profile`: rewriting SOUL + metadata would
-        # clear the "removed" marker and silently re-activate them. Skip and
-        # say how to re-join explicitly.
-        if spec.key in removed_keys:
+        # Fail closed when the existing profile must not become a team member:
+        # re-running init must not resurrect a member removed with
+        # `remove-member --keep-profile`, must not overwrite a standalone
+        # bot's SOUL/metadata (that would erase its persona and standalone
+        # marker — and expose it to destroy), must not steal another team's
+        # profile (its metadata records a different prefix), and must not
+        # guess when the metadata is unreadable (it may hide either marker).
+        reason = blocked.get(spec.key.lower())
+        if reason == "removed":
             click.echo(
                 f"  ⏭️  Profile '{profile_name}' exists but was removed from the team "
                 "(remove-member --keep-profile) — skipping, the removal stands\n"
                 "     To re-join it: hermes-team add-member; to re-create it: "
                 "delete the profile directory first"
+            )
+            skipped_count += 1
+            click.echo()
+            continue
+        if reason == "standalone":
+            click.echo(
+                f"  ⏭️  Profile '{profile_name}' exists but is a standalone bot (new-bot) — "
+                "skipping, its SOUL/metadata are kept as-is\n"
+                "     To use this role key for the team: delete the bot first "
+                f"(rm -rf '{get_profiles_dir() / profile_name}') or pick another prefix"
+            )
+            skipped_count += 1
+            click.echo()
+            continue
+        if reason == "foreign":
+            foreign_prefix = read_team_metadata(profile_name).get("prefix")
+            click.echo(
+                f"  ⏭️  Profile '{profile_name}' exists but belongs to team prefix "
+                f"'{foreign_prefix}' (recorded in {TEAM_METADATA_FILENAME}) — skipping, "
+                "its SOUL/metadata are kept as-is: re-rendering would silently rewrite "
+                "that team's member\n"
+                "     To use this role key here: remove the other team's profile first "
+                f"(rm -rf '{get_profiles_dir() / profile_name}') or pick another prefix"
+            )
+            skipped_count += 1
+            click.echo()
+            continue
+        if reason == "ambiguous":
+            click.echo(
+                f"  ⏭️  Profile '{profile_name}' exists, carries no recorded prefix, and "
+                "its name has a dash beyond this prefix's boundary — it may be another "
+                "team's profile just as well as this team's role: skipping, its "
+                "SOUL/metadata are kept as-is\n"
+                "     To use this role key here: delete the profile first "
+                f"(rm -rf '{get_profiles_dir() / profile_name}'), or re-init it under "
+                "its owning team to record that prefix"
+            )
+            skipped_count += 1
+            click.echo()
+            continue
+        if reason == "corrupt":
+            click.echo(
+                f"  ⏭️  Profile '{profile_name}' exists but its {TEAM_METADATA_FILENAME} is "
+                "unreadable — skipping, its SOUL/metadata are kept as-is (the file "
+                "may hide a removed/standalone marker)\n"
+                "     Fix or delete the profile, then re-run init"
             )
             skipped_count += 1
             click.echo()
@@ -470,12 +730,86 @@ def init_team(
                 "hub": hub_meta,
             },
             dry_run=dry_run,
+            harvested_ids=harvested_ids,
         )
         if ok:
             success_count += 1
         else:
             fail_count += 1
         click.echo()
+
+    # On-disk members included in this run's roster were re-rendered against
+    # it — their .hermes-team.json must say so too (team/prefix/hub), or the
+    # next add/remove-member rebuilds the roster from stale metadata (an old
+    # team name / an old hub) and flips every SOUL back. Roles written by
+    # _create_profile above already carry the current values; legacy
+    # no-metadata profiles stay metadata-less (patch-only, unchanged).
+    if not dry_run and roster_metadata_profiles:
+        for profile_name in roster_metadata_profiles:
+            meta = read_team_metadata(profile_name)
+            meta["team"] = team_name
+            meta["prefix"] = prefix
+            meta["hub"] = hub_meta
+            (get_profile_dir(profile_name) / TEAM_METADATA_FILENAME).write_text(
+                json.dumps(meta, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+        click.echo(
+            f"🔄 Refreshed team/prefix/hub metadata for {len(roster_metadata_profiles)} "
+            "on-disk member(s) re-rendered into this roster"
+        )
+
+        # When this run CHANGED the team's identity (team renamed, hub
+        # renamed, hub↔coordinator switch), the unselected members' own SOULs
+        # still reference the OLD roster — an old-hub @-line is a placeholder
+        # collect-ids can never fill, and verify's hub exemption follows the
+        # (refreshed) metadata, so a stale line would fail forever. Re-render
+        # those SOULs from their recorded templates (same context/harvested
+        # ids as everything above); a template that no longer resolves keeps
+        # its SOUL as-is, with a warning naming the actual fix.
+        new_identity = (team_name, json.dumps(hub_meta, sort_keys=True, ensure_ascii=False))
+        for profile_name in roster_metadata_profiles:
+            if old_identity.get(profile_name) == new_identity:
+                continue  # identity unchanged: SOUL and metadata already agree
+            meta = read_team_metadata(profile_name)
+            template_name, template_path = resolve_recorded_template(meta.get("template"))
+            soul_path = get_profile_dir(profile_name) / "SOUL.md"
+            if (template_name is None and template_path is None) or not soul_path.exists():
+                click.echo(
+                    f"  ⚠️  {profile_name}: team/hub identity changed but its template is "
+                    "not recoverable — its SOUL keeps the OLD roster lines (an old-hub "
+                    "placeholder can never be auto-filled; verify will keep failing for "
+                    "it). Restore the recorded template and re-run init, or edit the "
+                    "SOUL by hand."
+                )
+                continue
+            name = str(meta.get("name") or "")
+            role = str(meta.get("role") or "")
+            try:
+                content = render_soul(
+                    env,
+                    template_name or "",
+                    template_path,
+                    {
+                        "name": name,
+                        "nickname": str(meta.get("nickname") or name),
+                        "role": role,
+                        "description": role,  # bot-template team renders read the role text
+                        "team_name": team_name,
+                        "team_members": team_members,
+                        "owner_open_id": owner_open_id,
+                        "language": "zh",
+                    },
+                )
+            except Exception as e:  # noqa: BLE001 — one member's broken template must not abort init
+                click.echo(
+                    f"  ⚠️  {profile_name}: team/hub identity changed but re-rendering "
+                    f"failed ({e}) — its SOUL keeps the OLD roster lines (verify will "
+                    "keep failing for it until fixed)"
+                )
+                continue
+            soul_path.write_text(content, encoding="utf-8")
+            update_soul_md_open_ids(soul_path, harvested_ids)
+            click.echo(f"  🔄 {profile_name}: SOUL re-rendered to the current roster")
 
     # Summary
     click.echo("=" * 50)
@@ -488,16 +822,20 @@ def init_team(
         click.echo(f"✅ Team '{team_name}' initialized: {success_count} role(s) created")
     if skipped_count:
         click.echo(
-            f"⏭️  {skipped_count} role(s) skipped: profile kept but removed from the "
-            "team (re-join explicitly via hermes-team add-member)"
+            f"⏭️  {skipped_count} role(s) skipped — existing profile(s) kept: removed from "
+            "the team (re-join via hermes-team add-member), standalone bot, another "
+            "team's profile (recorded prefix), an ambiguous unrecorded name, or "
+            "unreadable metadata (see the per-role notes above)"
         )
     click.echo()
     click.echo("📋 Next steps:")
-    click.echo(f"   1. hermes-team configure --prefix {prefix}")
-    click.echo(f"   2. hermes-team start --prefix {prefix}")
+    # Quote the prefix for copy-paste: validate_prefix allows spaces, which
+    # the shell would otherwise split into arguments (same as the wizard).
+    click.echo(f"   1. hermes-team configure --prefix {shlex.quote(prefix)}")
+    click.echo(f"   2. hermes-team start --prefix {shlex.quote(prefix)}")
     click.echo("   3. In Feishu group: @all bots, wait 30s")
-    click.echo(f"   4. hermes-team collect-ids --prefix {prefix}")
-    click.echo(f"   5. hermes-team verify --prefix {prefix}")
+    click.echo(f"   4. hermes-team collect-ids --prefix {shlex.quote(prefix)}")
+    click.echo(f"   5. hermes-team verify --prefix {shlex.quote(prefix)}")
     if fail_count:
         # Same convention as verify/doctor: non-zero exit on failure, so
         # scripts/CI can detect a partial init.

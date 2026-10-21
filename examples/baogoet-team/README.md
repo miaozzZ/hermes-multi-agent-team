@@ -17,12 +17,14 @@ BaGoet 是一个由 6 个 AI Agent 组成的飞书协作团队，用于验证 he
 
 ## 搭建过程
 
+在本目录（`examples/baogoet-team/`）下执行，`init` 直接读取 `team.json`（6 角色：coordinator `M总` + pm/fe/be/qa/ui，prefix `baoget` 已在文件中声明）：
+
 ```bash
-# 1. 初始化团队
-hermes-team init --team-name BaGoet --roles pm,fe,be,qa,ui --prefix baoget
+# 1. 初始化团队（按 team.json 的角色与总管声明创建 profile）
+hermes-team init --config team.json
 
 # 2. 配置飞书凭证（每个角色一个独立飞书App）
-hermes-team configure --prefix baoget --platform feishu
+hermes-team configure --prefix baoget
 
 # 3. 启动所有gateway
 hermes-team start --prefix baoget

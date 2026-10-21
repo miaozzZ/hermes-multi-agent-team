@@ -49,7 +49,10 @@ def _make_member(
                 "role": role,
                 "coordinator": coordinator,
                 "team": "T",
-                "prefix": "team",
+                # The recorded prefix is what list_team_profiles matches on:
+                # derive it from the profile name (<prefix>-<key>) so fixtures
+                # with other prefixes (t-*, teamA-*) stay team-scoped.
+                "prefix": profile.rsplit("-", 1)[0],
                 "template": template,
             },
             ensure_ascii=False,
@@ -1318,3 +1321,529 @@ def test_init_on_disk_coordinator_leads_roster(
         soul = (tmp_hermes_home / "profiles" / profile / "SOUL.md").read_text()
         assert "老板" in soul
         assert "M总" not in soul
+
+
+def test_remove_member_does_not_swallow_other_team_sharing_prefix_stem(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Cross-prefix isolation at command level: 'teamA-qa' starts with the
+    string 'team' but is NOT part of the 'team' prefix — remove-member must
+    not plan (or perform) its deletion."""
+    _fake_hermes(tmp_path, monkeypatch)
+    _make_member(tmp_hermes_home, "team-pm", "pm", "P酱", "产品经理", "pm.md.j2")
+    _make_member(tmp_hermes_home, "team-qa", "qa", "Q宝", "测试QA", "qa.md.j2")
+    _make_member(tmp_hermes_home, "teamA-qa", "qa", "Q宝", "测试QA", "qa.md.j2")
+
+    result = CliRunner().invoke(
+        cli, ["remove-member", "--prefix", "team", "--key", "qa", "--dry-run"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "team-pm" in result.output
+    assert "teamA" not in result.output  # the other team stays out of scope
+
+
+def test_missing_recorded_template_never_re_renders_handwritten_soul(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Metadata recorded an external template whose file is gone: falling back
+    to the builtin template would re-render the member's hand-written persona
+    away. Only the 【飞书@方式】 section may be patched (docstring promise)."""
+    _fake_hermes(tmp_path, monkeypatch)
+    _make_member(
+        tmp_hermes_home,
+        "team-pm",
+        "pm",
+        "P酱",
+        "产品经理",
+        "/nonexistent/custom-pm.md.j2",
+    )
+    _make_member(tmp_hermes_home, "team-qa", "qa", "Q宝", "测试QA", "qa.md.j2")
+    pm_dir = tmp_hermes_home / "profiles" / "team-pm"
+    pm_soul = pm_dir / "SOUL.md"
+    handwritten = pm_soul.read_text() + "\n这是我手写的独家人设，不许覆盖。\n"
+    pm_soul.write_text(handwritten, encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli, ["remove-member", "--prefix", "team", "--key", "qa", "--force"]
+    )
+    assert result.exit_code == 0, result.output
+    # dry-run announcement would have said "patch", not "re-render":
+    assert "re-render team-pm" not in result.output
+
+    # The hand-written persona survived; only the departing @-line was dropped.
+    after = pm_soul.read_text()
+    assert "这是我手写的独家人设" in after
+    assert "Q宝" not in after
+
+
+def test_member_without_recorded_template_still_falls_back_to_builtin(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Pre-0.6 metadata records no 'template' at all: the key's builtin
+    template remains the documented fallback (re-render allowed)."""
+    _fake_hermes(tmp_path, monkeypatch)
+    for profile, key, name in (("team-pm", "pm", "P酱"), ("team-qa", "qa", "Q宝")):
+        _make_member(tmp_hermes_home, profile, key, name, "成员", "pm.md.j2")
+        meta_path = tmp_hermes_home / "profiles" / profile / ".hermes-team.json"
+        meta = json.loads(meta_path.read_text())
+        del meta["template"]
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "add-member",
+            "--prefix",
+            "team",
+            "--key",
+            "fe",
+            "--name",
+            "F仔",
+            "--role",
+            "前端开发",
+            "--template",
+            "frontend",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    # Re-rendered from the builtin pm template: roster contains the new member.
+    pm_soul = (tmp_hermes_home / "profiles" / "team-pm" / "SOUL.md").read_text()
+    assert "F仔" in pm_soul
+
+
+def test_remove_member_isolates_dash_nested_prefixes(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """'team-extra-pm' starts with 'team-' but belongs to the 'team-extra'
+    team (its metadata says so): remove-member --prefix team must neither
+    plan nor delete it — the name-based match alone could not tell the two
+    teams apart."""
+    _fake_hermes(tmp_path, monkeypatch)
+    _make_member(tmp_hermes_home, "team-pm", "pm", "P酱", "产品经理", "pm.md.j2")
+    _make_member(tmp_hermes_home, "team-qa", "qa", "Q宝", "测试QA", "qa.md.j2")
+    _make_member(tmp_hermes_home, "team-extra-pm", "pm", "P酱", "产品经理", "pm.md.j2")
+
+    dry = CliRunner().invoke(cli, ["remove-member", "--prefix", "team", "--key", "pm", "--dry-run"])
+    assert dry.exit_code == 0, dry.output
+    # Never a removal target (its recorded prefix keeps it out of the team).
+    assert "Profile team-extra-pm" not in dry.output
+
+    real = CliRunner().invoke(cli, ["remove-member", "--prefix", "team", "--key", "pm", "--force"])
+    assert real.exit_code == 0, real.output
+    # The other team's profile survived.
+    assert (tmp_hermes_home / "profiles" / "team-extra-pm" / "SOUL.md").exists()
+    assert not (tmp_hermes_home / "profiles" / "team-pm").exists()
+
+
+def test_remove_member_excludes_legacy_ambiguous_profile_with_warning(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The same dash-nested shape WITHOUT metadata ('team-extra-pm' has no
+    .hermes-team.json): the name alone cannot attribute it, so it is excluded
+    from the team AND the exclusion is announced — not silently swallowed
+    into the deletion plan."""
+    _fake_hermes(tmp_path, monkeypatch)
+    _make_member(tmp_hermes_home, "team-pm", "pm", "P酱", "产品经理", "pm.md.j2")
+    _make_member(tmp_hermes_home, "team-qa", "qa", "Q宝", "测试QA", "qa.md.j2")
+    legacy = tmp_hermes_home / "profiles" / "team-extra-pm"
+    legacy.mkdir(parents=True)
+    (legacy / ".env").write_text("")
+    (legacy / "SOUL.md").write_text("【飞书@方式】\n- @P酱\n", encoding="utf-8")
+
+    dry = CliRunner().invoke(cli, ["remove-member", "--prefix", "team", "--key", "pm", "--dry-run"])
+    assert dry.exit_code == 0, dry.output
+    assert "Profile team-extra-pm" not in dry.output  # not a removal target
+    assert "team-extra-pm" in dry.output  # but its exclusion is announced
+    assert "may belong to team 'team-extra'" in dry.output
+
+
+def test_hub_null_metadata_never_gets_legacy_hub_injected(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """ "hub": null in metadata is a DELIBERATE "no render-only hub" declaration
+    (coordinator teams / hub-less configs) — a legacy no-metadata profile in
+    the same team must not pull the M总 fallback back into new rosters."""
+    _fake_hermes(tmp_path, monkeypatch)
+    # pm records an explicit "hub": null.
+    pm_dir = tmp_hermes_home / "profiles" / "team-pm"
+    pm_dir.mkdir(parents=True)
+    (pm_dir / ".hermes-team.json").write_text(
+        json.dumps(
+            {
+                "key": "pm",
+                "name": "P酱",
+                "nickname": "小P",
+                "role": "产品经理",
+                "coordinator": False,
+                "team": "T",
+                "prefix": "team",
+                "template": "pm.md.j2",
+                "hub": None,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (pm_dir / "SOUL.md").write_text(
+        '【飞书@方式】\n- @P酱：`<at user_id="ou_xxx_pm">P酱</at>`\n',
+        encoding="utf-8",
+    )
+    # fe is a legacy profile without metadata at all.
+    fe_dir = tmp_hermes_home / "profiles" / "team-fe"
+    fe_dir.mkdir(parents=True)
+    (fe_dir / "SOUL.md").write_text(
+        '【飞书@方式】\n- @F仔：`<at user_id="ou_xxx_fe">F仔</at>`\n',
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "add-member",
+            "--prefix",
+            "team",
+            "--key",
+            "writer",
+            "--name",
+            "阿写",
+            "--role",
+            "内容创作",
+            "--template",
+            "pm",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    # The new member's SOUL was rendered WITHOUT the legacy M总 hub.
+    writer_soul = (tmp_hermes_home / "profiles" / "team-writer" / "SOUL.md").read_text()
+    assert "M总" not in writer_soul
+    assert "阿写" in writer_soul
+
+
+def test_legacy_team_without_any_hub_record_still_gets_mz(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Pure legacy teams (no metadata anywhere) keep the M总 fallback: every
+    pre-metadata init rendered it into all SOULs unconditionally."""
+    _fake_hermes(tmp_path, monkeypatch)
+    for profile, key, name in (("team-pm", "pm", "P酱"), ("team-fe", "fe", "F仔")):
+        d = tmp_hermes_home / "profiles" / profile
+        d.mkdir(parents=True)
+        (d / "SOUL.md").write_text(
+            f'【飞书@方式】\n- @{name}：`<at user_id="ou_xxx_{key}">{name}</at>`\n',
+            encoding="utf-8",
+        )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "add-member",
+            "--prefix",
+            "team",
+            "--key",
+            "writer",
+            "--name",
+            "阿写",
+            "--role",
+            "内容创作",
+            "--template",
+            "pm",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    writer_soul = (tmp_hermes_home / "profiles" / "team-writer" / "SOUL.md").read_text()
+    assert "M总" in writer_soul
+
+
+def test_reinit_with_new_config_refreshes_on_disk_members_metadata(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Re-init with a different config re-renders on-disk members into the
+    NEW roster — their metadata (team/prefix/hub) must be refreshed too, or
+    the next add/remove-member rebuilds the roster from stale metadata and
+    flips every SOUL back to the old team name / old hub."""
+    _fake_hermes(tmp_path, monkeypatch)
+    old_cfg = tmp_path / "a.json"
+    old_cfg.write_text(
+        json.dumps(
+            {
+                "team_name": "OldTeam",
+                "prefix": "t",
+                "roles": [
+                    {"key": "pm", "name": "P酱", "role": "产品经理"},
+                    {"key": "fe", "name": "F仔", "role": "前端开发"},
+                ],
+                "coordinator_fallback": {"name": "M总"},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    new_cfg = tmp_path / "b.json"
+    new_cfg.write_text(
+        json.dumps(
+            {
+                "team_name": "NewTeam",
+                "prefix": "t",
+                "roles": [
+                    {"key": "pm", "name": "P酱", "role": "产品经理"},
+                    {"key": "fe", "name": "F仔", "role": "前端开发"},
+                ],
+                "coordinator": {"key": "boss", "name": "老板", "role": "总管"},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    r1 = CliRunner().invoke(cli, ["init", "--config", str(old_cfg)])
+    assert r1.exit_code == 0, r1.output
+    r2 = CliRunner().invoke(cli, ["init", "--config", str(new_cfg), "--roles", "pm"])
+    assert r2.exit_code == 0, r2.output
+
+    # The on-disk fe member was folded into the new roster: its metadata now
+    # names the new team and the new coordinator arrangement (hub: null).
+    fe_meta = json.loads((tmp_hermes_home / "profiles" / "t-fe" / ".hermes-team.json").read_text())
+    assert fe_meta["team"] == "NewTeam"
+    assert "hub" in fe_meta and fe_meta["hub"] is None
+
+    # So a later add-member rebuilds the roster consistently: NewTeam, led by
+    # the 老板 coordinator, with no stale M总 anywhere.
+    r3 = CliRunner().invoke(
+        cli,
+        [
+            "add-member",
+            "--prefix",
+            "t",
+            "--key",
+            "qa",
+            "--name",
+            "Q宝",
+            "--role",
+            "测试QA",
+            "--template",
+            "qa",
+        ],
+    )
+    assert r3.exit_code == 0, r3.output
+    qa_soul = (tmp_hermes_home / "profiles" / "t-qa" / "SOUL.md").read_text()
+    assert "NewTeam" in qa_soul
+    assert "老板" in qa_soul
+    assert "M总" not in qa_soul
+
+
+def test_load_roster_fails_closed_on_multiple_coordinators(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Several coordinator=true profiles must not all enter the roster — and
+    silently keeping the sorted-first would let init and add/remove-member
+    lead the SAME team with different 总管s (init's config coordinator wins
+    there, the sorted-first here), flipping every SOUL between them.
+    Fail closed: name every coordinator, change no roster."""
+    _fake_hermes(tmp_path, monkeypatch)
+    _make_member(tmp_hermes_home, "team-pm", "pm", "P酱", "产品经理", "pm.md.j2")
+    _make_member(
+        tmp_hermes_home,
+        "team-boss1",
+        "boss1",
+        "老板1",
+        "总管",
+        "coordinator.md.j2",
+        coordinator=True,
+    )
+    _make_member(
+        tmp_hermes_home,
+        "team-boss2",
+        "boss2",
+        "老板2",
+        "总管",
+        "coordinator.md.j2",
+        coordinator=True,
+    )
+    _make_member(
+        tmp_hermes_home,
+        "team-boss3",
+        "boss3",
+        "老板3",
+        "总管",
+        "coordinator.md.j2",
+        coordinator=True,
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "add-member",
+            "--prefix",
+            "team",
+            "--key",
+            "qa",
+            "--name",
+            "Q宝",
+            "--role",
+            "测试QA",
+            "--template",
+            "qa",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "Multiple coordinator profiles on disk" in result.output
+    for profile in ("team-boss1", "team-boss2", "team-boss3"):
+        assert profile in result.output
+    # Failed before any write: no qa profile, pm's SOUL untouched.
+    assert not (tmp_hermes_home / "profiles" / "team-qa").exists()
+    assert "老板2" not in (tmp_hermes_home / "profiles" / "team-pm" / "SOUL.md").read_text()
+
+
+def test_load_roster_rejects_duplicate_member_name(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Two on-disk profiles claiming the SAME name render identical @-lines
+    and make collect-ids' name→open_id mapping ambiguous — refuse the roster
+    change up front, like init does for its union scan."""
+    _fake_hermes(tmp_path, monkeypatch)
+    _make_member(tmp_hermes_home, "team-pm", "pm", "P酱", "产品经理", "pm.md.j2")
+    _make_member(tmp_hermes_home, "team-twin", "twin", "P酱", "神秘角色", "pm.md.j2")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "add-member",
+            "--prefix",
+            "team",
+            "--key",
+            "qa",
+            "--name",
+            "Q宝",
+            "--role",
+            "测试QA",
+            "--template",
+            "qa",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "Duplicate member name 'P酱'" in result.output
+
+
+def test_load_roster_rejects_duplicate_role_key(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A legacy profile classified to key 'pm' plus a metadata profile also
+    keyed 'pm' means two profiles fight over one <prefix>-<key> — refuse."""
+    _fake_hermes(tmp_path, monkeypatch)
+    # Legacy: no metadata, suffix pm → key pm.
+    legacy = tmp_hermes_home / "profiles" / "team-pm"
+    legacy.mkdir(parents=True)
+    (legacy / ".env").write_text("")
+    (legacy / "SOUL.md").write_text(
+        '【飞书@方式】\n- @P酱：`<at user_id="ou_xxx_pm">P酱</at>`\n', encoding="utf-8"
+    )
+    # Metadata member with the SAME key under a different profile name.
+    _make_member(tmp_hermes_home, "team-writer", "pm", "P酱", "内容创作", "pm.md.j2")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "add-member",
+            "--prefix",
+            "team",
+            "--key",
+            "qa",
+            "--name",
+            "Q宝",
+            "--role",
+            "测试QA",
+            "--template",
+            "qa",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "Duplicate role key 'pm'" in result.output
+
+
+def test_add_member_rejoining_rejects_foreign_removed_profile(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A kept-but-removed profile of ANOTHER team (dash-nested name
+    collision: team-extra's removed pm2 seen as key 'extra-pm' of team) must
+    not be re-joined and overwritten — its metadata records team-extra."""
+    _fake_hermes(tmp_path, monkeypatch)
+    _make_member(tmp_hermes_home, "team-pm", "pm", "P酱", "产品经理", "pm.md.j2")
+    # Another team's removed member.
+    foreign = tmp_hermes_home / "profiles" / "team-extra-pm"
+    foreign.mkdir(parents=True)
+    (foreign / ".hermes-team.json").write_text(
+        json.dumps(
+            {
+                "key": "pm",
+                "name": "X酱",
+                "removed": True,
+                "team": "TeamExtra",
+                "prefix": "team-extra",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (foreign / "SOUL.md").write_text("TeamExtra 成员人设\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "add-member",
+            "--prefix",
+            "team",
+            "--key",
+            "extra-pm",
+            "--name",
+            "Y酱",
+            "--role",
+            "成员",
+            "--template",
+            "pm",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "belongs to team prefix 'team-extra'" in result.output
+    # Nothing was overwritten.
+    assert (foreign / "SOUL.md").read_text(encoding="utf-8") == "TeamExtra 成员人设\n"
+
+
+def test_add_member_write_failure_cleans_orphan_profile(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """An OSError while writing the new member's SOUL/metadata (after the
+    render succeeded) used to escape as a bare traceback AND leave a
+    config.yaml-only orphan profile dir that blocks retries — clean it up
+    like a render failure and report the profile by name."""
+    _fake_hermes(tmp_path, monkeypatch)
+    _make_member(tmp_hermes_home, "team-pm", "pm", "P酱", "产品经理", "pm.md.j2")
+
+    def _boom(soul_path, mapping):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("hermes_multi_agent_team.commands.member.update_soul_md_open_ids", _boom)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "add-member",
+            "--prefix",
+            "team",
+            "--key",
+            "qa",
+            "--name",
+            "Q宝",
+            "--role",
+            "测试QA",
+            "--template",
+            "qa",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "Could not write SOUL/metadata for team-qa" in result.output
+    assert "Traceback" not in result.output
+    # The just-created orphan profile dir was removed — a retry is possible.
+    assert not (tmp_hermes_home / "profiles" / "team-qa").exists()

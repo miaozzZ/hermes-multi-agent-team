@@ -38,16 +38,7 @@ hermes-team verify --prefix MyTeam
 
 ## 🎯 项目定位
 
-`hermes-multi-agent-team` 是一个 **CLI 工具 + Hermes Skill** 的组合：
-
-| 使用方式 | 说明 | 适用场景 |
-|----------|------|----------|
-| **独立 CLI** | 直接运行 `hermes-team` 命令 | 脚本化、CI/CD、手动精细控制 |
-| **Hermes Skill** | 对 Hermes 说「帮我搭团队」，它按 Skill 指导自动调用 CLI | 自然语言交互、Agent 自主操作 |
-
-- **CLI 工具**：`hermes-team init / configure / start / ...`，可独立使用，不依赖 Hermes Agent 运行时
-- **Hermes Skill**：`multi-agent-team-setup` Skill 文件，安装到 Hermes 后，Agent 会自动理解如何搭建和管理团队
-- 两者共享同一套核心代码，Skill 是 CLI 的「使用说明书」
+`hermes-multi-agent-team` 是一个 **独立 CLI 工具**：`hermes-team init / configure / start / ...` 直接运行，不依赖 Hermes Agent 运行时，适合脚本化、CI/CD 与手动精细控制。
 
 ---
 
@@ -354,6 +345,29 @@ Options:
 - 不能移除团队最后一个成员（用 `destroy`）
 - 飞书侧需要手动把机器人移出群
 
+### `hermes-team new-bot`
+
+创建**独立单功能 agent**——不属于任何团队，由 host 网关直接服务。
+
+```bash
+hermes-team new-bot NAME [OPTIONS]
+
+Options:
+  --display-name TEXT  人设显示名（默认同 NAME）
+  --description TEXT   一句话功能描述（缺省时交互询问；--dry-run 用占位符，不询问）
+  --template TEXT      SOUL 模板：文件路径或内置 roster-free `bot` 模板（默认）。内置团队模板（pm/frontend/coordinator…）依赖名单上下文，会被拒绝并提示
+  --clone-from TEXT    从已有 Profile 克隆模型配置
+  --dry-run            只显示将要做的变更
+```
+
+**适用场景**：签到、播报、查询这类单职责 bot。它们与团队的差别：
+
+- SOUL 是无名单的简洁模板（没有【飞书@方式】、没有协作规则）；`verify` 对它跳过 open_id 检查
+- 元数据标记 `standalone: true`：`collect-ids`、团队增减成员、`init` 重跑的成员并集扫描都会**自动忽略**它（即使它与某团队共享前缀）；`destroy` 也**不会**删除共享前缀的 standalone bot
+- 配置/凭证与其他 profile 一致：`configure --prefix NAME`（要自己的飞书 App），`start` 的查重同样覆盖它
+- 单功能 bot 通常希望**只被 @ 时响应**：`configure` 时把 `REQUIRE_MENTION` 保持默认 `true`（与团队成员相反；团队+bot 共享前缀的混合 configure 中，该键会为 bot 单独再问一次，默认仍为 `true`）
+- 不进群的用法（cron/CLI）：建好后直接 `hermes -p NAME chat` 或挂 cron，无需任何飞书配置
+
 ### `hermes-team new-config`
 
 交互式向导，生成团队配置 JSON（配合 `init --config` 使用）。
@@ -400,35 +414,31 @@ Options:
 
 ### `hermes-team doctor`
 
-诊断团队配置问题并给出修复建议。
+检查环境依赖与就绪状态。**不接收任何参数**——它检查的是运行环境，不是某个团队的配置（团队层面的检查由 `verify --prefix` 负责）。
 
 ```bash
-hermes-team doctor [OPTIONS]
-
-Options:
-  --prefix TEXT    Profile 名称前缀  [required]
-  --fix            自动修复可修复的问题
+hermes-team doctor
 ```
 
-检查项：
-- 🔍 Profile 目录结构完整性
-- 🔍 `.env` 字段缺失或格式错误
-- 🔍 SOUL.md 中 open_id 是否为占位符
-- 🔍 Gateway 进程是否存活
-- 🔍 模板文件是否为最新版本
-- 🔍 `--fix` 模式可自动修复常见问题
+检查项（`doctor.py` 的 7 项环境检查）：
+- 🔍 Python ≥ 3.10
+- 🔍 Hermes CLI 可用（含 `~/.hermes/hermes-agent/venv/bin/hermes` 安装位）
+- 🔍 Hermes 版本 ≥ 0.19（multiplexed gateway；过低时提示 `hermes update`）
+- 🔍 Python 依赖：click、python-dotenv、Jinja2
+- 🔍 `~/.hermes/profiles` 目录是否存在
+
+存在失败检查项时以**非 0 退出码**结束（脚本/CI 可感知）。
 
 ### `hermes-team destroy`
 
-清理团队：停止 Gateway、删除 Profile 目录。
+清理团队：删除团队 Profile 目录（不停止 Gateway——multiplex host 网关会继续运行，重扫后不再服务被删除的 profile）。共享该前缀的 **standalone bot 不会被删除**（`--force` 也不删，会提示手动清理路径）。
 
 ```bash
 hermes-team destroy [OPTIONS]
 
 Options:
   --prefix TEXT    Profile 名称前缀  [required]
-  --dry-run        显示将要删除的内容，不实际执行
-  --keep-logs      保留日志文件
+  --force          跳过确认提示
 ```
 
 ⚠️ **注意：** 此操作不可逆，请确保已备份重要数据。
@@ -509,19 +519,20 @@ hermes-team init --config my-team.json
 - `roles`：每个角色需要 `key`（进入 profile 名 `<prefix>-<key>`，限字母/数字/`-`/`_`）、`name`（SOUL 与 collect-ids 回填 open_id 的匹配名，**必须全局唯一**）、`role`（职位）；`nickname` 缺省等于 `name`
 - `coordinator`：可选。声明后 init 会**一并创建总管 profile** 并渲染总管 SOUL（不声明则沿用旧行为：不建总管 profile，总管由你的主 profile 担任）
 - `coordinator_fallback`：可选，与 `coordinator` **互斥**（两者同时声明会在加载时报错）。声明一个 **render-only 总管条目**（`name` 必填；`role` 缺省 `总管`，`nickname` 缺省 `name`）：只进入 `team_members` 供成员 @（内置模板要求「只 @总管 汇报」），不建 profile、不参与 open_id 自动回填；名称须与角色名互异。内置默认团队自带的这一条目为 `M总`
-- `template`：自定义角色必须指定。可以是相对 config 文件的**模板文件路径**（完全自定义人设；只相对 config 所在目录解析，不回退当前目录），也可以复用内置模板的短名（`pm`/`frontend`/`backend`/`qa`/`designer`/`coordinator`）；内置 5 角色（pm/fe/be/qa/ui）不写则用默认模板
+- `template`：自定义角色必须指定。可以是相对 config 文件的**模板文件路径**（完全自定义人设；只相对 config 所在目录解析，不回退当前目录），也可以复用内置模板的短名（`pm`/`frontend`/`backend`/`qa`/`designer`/`coordinator`/`bot`——`bot` 为无【飞书@方式】的简洁模板，团队渲染时以 `role` 文本充当 `description`、身份句自称该团队的单职责成员，`verify` 对它跳过 open_id 检查）；内置 5 角色（pm/fe/be/qa/ui）不写则用默认模板
 
-init 会在每个 profile 里写入 `.hermes-team.json` 元数据，`collect-ids` 据此适配自定义角色名（**声明 coordinator 时**总管的 open_id 也自动回填），旧团队（无元数据）自动回退到内置角色表；`verify` 不读元数据——它按 `ou_xxx` 前缀识别占位符 open_id，天然适配任意角色名。注意：**声明了 `coordinator_fallback` 的团队（以及内置默认团队）**才有 render-only 总管占位（无 profile/元数据），其 open_id **不参与自动回填**，需要时手动填写；两者都未声明的自定义团队 roster 中没有任何总管条目。
+init 会在每个 profile 里写入 `.hermes-team.json` 元数据，`collect-ids` 据此适配自定义角色名（**声明 coordinator 时**总管的 open_id 也自动回填），旧团队（无元数据）自动回退到内置角色表；`verify` 对占位符 open_id 的识别按 `ou_xxx` 前缀、天然适配任意角色名，它只读元数据的 standalone 标记与模板名（standalone bot 与 roster-free `bot` 模板成员跳过 open_id 名单检查）。注意：**声明了 `coordinator_fallback` 的团队（以及内置默认团队）**才有 render-only 总管占位（无 profile/元数据），其 open_id **不参与自动回填**，需要时手动填写；两者都未声明的自定义团队 roster 中没有任何总管条目。
 
 自定义 SOUL 模板是 Jinja2，可用变量：
 - `{{ name }}` / `{{ nickname }}` / `{{ role }}` — 本角色的显示名/小名/职位
+- `{{ description }}` — 一句话描述（roster-free `bot` 模板使用；团队渲染等于 `role` 文本，`new-bot` 为功能描述）
 - `{{ team_name }}` — 团队名称
 - `{{ team_members }}` — 团队成员列表（`name`/`nickname`/`role`/`open_id`），声明 coordinator 时总管排第一；不声明时若声明了 `coordinator_fallback`（或内置默认团队自带的 `M总`）则该 render-only 总管条目排第一，否则只含声明的角色（注意：内置模板要求成员「只 @总管 汇报」，建议声明 `coordinator` 或 `coordinator_fallback`，否则成员没有可 @ 的总管条目，init 也会给出警告）
 - `{{ owner_open_id }}` — 主人 open_id 占位
 
 > 提示：人设正文要保留 `【飞书@方式】` 小节并使用 `{% for member in team_members %}` 循环生成 `<at user_id="{{ member.open_id }}">...</at>`，collect-ids 才能自动回填 open_id。
 
-内置模板位于 `hermes_multi_agent_team/templates/SOUL/`（coordinator/pm/frontend/backend/qa/designer），可直接复制一份改写。
+内置模板位于 `hermes_multi_agent_team/templates/SOUL/`（coordinator/pm/frontend/backend/qa/designer/bot），可直接复制一份改写。
 
 ---
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 import sys
 
 import click
@@ -10,14 +11,17 @@ import click
 from hermes_multi_agent_team.utils.gateway import gateway_status
 from hermes_multi_agent_team.utils.profile import (
     DEFAULT_PROFILE_ENV_LABEL,
-    get_hermes_home,
+    default_env_unreadable,
     get_profile_dir,
+    is_standalone_profile,
     list_all_profile_names,
     list_team_profiles,
     profile_served_by_host,
     read_default_env,
     read_env,
     read_soul,
+    read_team_metadata,
+    team_metadata_corrupt,
 )
 
 # Required .env keys
@@ -94,24 +98,86 @@ def _check_profile(profile_name: str) -> dict[str, tuple[bool, str]]:
     soul = read_soul(profile_name)
     checks["soul_md"] = (bool(soul), "OK" if soul else "SOUL.md not found or empty")
 
-    # 4. SOUL.md has real open_ids (not placeholders)
-    if soul:
-        placeholder_pattern = re.compile(r'user_id="ou_xxx[^"]*"')
-        has_placeholders = bool(placeholder_pattern.search(soul))
-        real_id_pattern = re.compile(r'user_id="(ou_[a-zA-Z0-9]+)"')
-        # Placeholders are "ou_xxx" + any role key (custom teams included).
-        # Real Feishu open_ids are "ou_" + hex-ish characters, so they never
-        # start with "xxx" — excluding by prefix is role-key-agnostic.
-        real_ids = {
-            open_id for open_id in real_id_pattern.findall(soul) if not open_id.startswith("ou_xxx")
-        }
+    # 3.5 Metadata readable: every other team command (collect-ids,
+    # configure, destroy, init, add/remove-member) fails closed on a corrupt
+    # .hermes-team.json — verify must name the cause instead of leaving the
+    # user to misread its downstream symptoms ("no open_ids found") as a
+    # SOUL/.env problem. Absent metadata (legacy teams) is fine.
+    corrupt = team_metadata_corrupt(profile_name)
+    checks["team_metadata"] = (
+        not corrupt,
+        "OK"
+        if not corrupt
+        else "unreadable .hermes-team.json — it may hide standalone/removed "
+        "markers (other team commands skip such profiles); fix or delete the file",
+    )
 
-        if has_placeholders and not real_ids:
-            checks["open_ids"] = (False, "SOUL.md still has placeholder open_ids")
-        elif real_ids:
-            checks["open_ids"] = (True, f"found {len(real_ids)} open_id(s)")
+    # 4. SOUL.md has real open_ids (not placeholders). Standalone bots
+    # (new-bot) carry no roster by design — and so do TEAM members rendered
+    # from the roster-free bot template ("template": "bot" in a team config /
+    # add-member --key bot): their SOUL has no 【飞书@方式】 section, so
+    # collect-ids can never fill ids and this check would fail forever.
+    if soul:
+        if is_standalone_profile(profile_name):
+            checks["open_ids"] = (True, "standalone bot — no roster expected")
         else:
-            checks["open_ids"] = (False, "no open_ids found in SOUL.md")
+            meta = read_team_metadata(profile_name)
+            if meta.get("template") == "bot.md.j2":
+                checks["open_ids"] = (True, "roster-free bot template — no roster expected")
+            else:
+                # Placeholders are "ou_xxx" + any role key; keys allow dashes
+                # and underscores (_KEY_RE), so the id capture is [^"]* — a
+                # narrower class would leave ou_xxx_front-end invisible and
+                # pass a team that cannot @ that member.
+                at_pattern = re.compile(r'<at user_id="([^"]+)">([^<]+)</at>')
+                # Two roster lines are placeholders BY DESIGN and never
+                # auto-filled by collect-ids (it only maps bot ids): the owner
+                # line (name 主人 — reserved, no member may take it) and the
+                # render-only hub (identified by NAME from this profile's
+                # recorded hub, or the legacy M总 for pre-metadata teams).
+                # Exempting by placeholder ID (ou_xxx_coordinator/owner)
+                # would wrongly excuse a real member whose KEY happens to be
+                # "coordinator"/"owner" — its placeholder is never filled
+                # either. A declared coordinator ("hub": null) gets NO hub
+                # exemption: the coordinator is a real, @-able member.
+                exempt_names = {"主人"}
+                hub_raw = meta.get("hub")
+                if isinstance(hub_raw, dict) and isinstance(hub_raw.get("name"), str):
+                    exempt_names.add(hub_raw["name"])
+                elif "hub" not in meta:
+                    # No hub record at all (legacy teams, or metadata from
+                    # before the hub field existed): the builtin M总 was
+                    # rendered into every SOUL and is never auto-filled. A
+                    # PRESENT "hub" key (null or a dict) is a deliberate
+                    # declaration — no M总 exemption for those teams.
+                    exempt_names.add("M总")
+                placeholders: list[str] = []
+                real_ids: set[str] = set()
+                for open_id, name in at_pattern.findall(soul):
+                    if open_id.startswith("ou_xxx"):
+                        if name not in exempt_names:
+                            placeholders.append(name)
+                    else:
+                        real_ids.add(open_id)
+
+                if placeholders:
+                    # One unfilled @-line is enough to make that member
+                    # un-@-able from this SOUL — passing because OTHER ids
+                    # are real would green-light a team that cannot mention
+                    # everyone (e.g. right after add-member, before
+                    # collect-ids re-runs).
+                    names = list(dict.fromkeys(placeholders))
+                    shown = ", ".join(names[:3])
+                    suffix = "" if len(names) <= 3 else f" (+{len(names) - 3} more)"
+                    detail = (
+                        f"{len(names)} placeholder open_id(s) remain "
+                        f"(e.g. {shown}{suffix}) — run collect-ids"
+                    )
+                    checks["open_ids"] = (False, detail)
+                elif real_ids:
+                    checks["open_ids"] = (True, f"found {len(real_ids)} open_id(s)")
+                else:
+                    checks["open_ids"] = (False, "no open_ids found in SOUL.md")
     else:
         checks["open_ids"] = (False, "no SOUL.md")
 
@@ -224,13 +290,16 @@ def verify_team(prefix: str) -> None:
         click.echo()
 
     # start's uniqueness scan reads the default profile's .env too — when it
-    # cannot be read that scan runs blind, and the user should know here.
-    default_env_path = get_hermes_home() / ".env"
-    default_env_unreadable = default_env_path.exists() and not read_default_env()
-    if default_env_unreadable:
+    # exists but cannot be READ (permissions/encoding) that scan runs blind,
+    # and the user should know here. A readable-but-empty file is NOT a
+    # failure: it carries no App ID, so it cannot hide a duplicate (start
+    # merely warns about it) — conflating the two used to fail verify on a
+    # harmless 0-byte ~/.hermes/.env.
+    default_env_bad = default_env_unreadable()
+    if default_env_bad:
         all_pass = False
         click.echo(
-            f"❌ {DEFAULT_PROFILE_ENV_LABEL} exists but is unreadable or empty — "
+            f"❌ {DEFAULT_PROFILE_ENV_LABEL} exists but is unreadable — "
             "start's App-ID uniqueness scan cannot see it. "
             "Fix its permissions/encoding."
         )
@@ -255,15 +324,17 @@ def verify_team(prefix: str) -> None:
     shown_failures = failed_profiles + sorted(
         owner for owner in duplicate_outside_owners if owner not in failed_profiles
     )
-    if default_env_unreadable and DEFAULT_PROFILE_ENV_LABEL not in shown_failures:
+    if default_env_bad and DEFAULT_PROFILE_ENV_LABEL not in shown_failures:
         shown_failures.append(DEFAULT_PROFILE_ENV_LABEL)
     click.echo(f"⚠️  Some checks failed for: {', '.join(shown_failures)}")
     click.echo()
     click.echo("🔧 Common fixes:")
+    # shlex.quote: prefixes may contain spaces (validate_prefix allows them) —
+    # copy-pasting an unquoted command would split into arguments.
     if duplicates:
         click.echo(
             "   - Duplicate App IDs: hermes-team configure --prefix "
-            + prefix
+            + shlex.quote(prefix)
             + " (one Feishu app per agent)"
         )
         for owner in sorted(duplicate_outside_owners):
@@ -274,12 +345,12 @@ def verify_team(prefix: str) -> None:
             else:
                 name = owner.split(" (", 1)[0]
                 click.echo(f"     - {owner}: edit ~/.hermes/profiles/{name}/.env directly")
-    if default_env_unreadable:
+    if default_env_bad:
         click.echo(
             f"   - {DEFAULT_PROFILE_ENV_LABEL}: not readable — fix permissions/encoding "
             "of ~/.hermes/.env (configure cannot manage it)"
         )
-    click.echo("   - Missing .env: hermes-team configure --prefix " + prefix)
-    click.echo("   - No open_ids: hermes-team collect-ids --prefix " + prefix)
-    click.echo("   - Gateway not running: hermes-team start --prefix " + prefix)
+    click.echo("   - Missing .env: hermes-team configure --prefix " + shlex.quote(prefix))
+    click.echo("   - No open_ids: hermes-team collect-ids --prefix " + shlex.quote(prefix))
+    click.echo("   - Gateway not running: hermes-team start --prefix " + shlex.quote(prefix))
     sys.exit(1)

@@ -51,6 +51,7 @@ _KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 # Bundled SOUL templates: short alias → package file name.
 _BUILTIN_TEMPLATES: dict[str, str] = {
     "coordinator": "coordinator.md.j2",
+    "bot": "bot.md.j2",
     "pm": "pm.md.j2",
     "frontend": "frontend.md.j2",
     "backend": "backend.md.j2",

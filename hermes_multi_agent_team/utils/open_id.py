@@ -5,6 +5,13 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from hermes_multi_agent_team.utils.profile import (
+    is_standalone_profile,
+    read_soul,
+    read_team_metadata,
+    team_metadata_corrupt,
+)
+
 
 def extract_open_ids(log_path: str | Path) -> dict[str, set[str]]:
     """Extract Feishu open_ids from a gateway log file.
@@ -96,6 +103,35 @@ def harvest_open_ids(soul_text: str) -> dict[str, str]:
             continue
         mapping.setdefault(name, open_id)
     return mapping
+
+
+def harvest_team_open_ids(profiles: list[str]) -> dict[str, str]:
+    """name → open_id from every member's SOUL <at> tags, placeholders skipped.
+
+    Lives here (next to harvest_open_ids) so init and add/remove-member share
+    one implementation without a command-to-command import cycle.
+
+    Profiles marked removed (kept via --keep-profile) are skipped, like in
+    member.py's roster rebuild and collect-ids: a departed member's SOUL may
+    carry stale ids, and the last-profile-wins merge would push them back
+    into every remaining SOUL during the re-render. Standalone bots sharing
+    the prefix are skipped too — open_ids are isolated per Feishu app, so a
+    standalone bot's SOUL holds ids from ITS app that match nobody in the
+    team's. Profiles with unreadable metadata are skipped as well (fail
+    closed: the file may hide a standalone marker).
+    """
+    harvested: dict[str, str] = {}
+    for profile_name in profiles:
+        if team_metadata_corrupt(profile_name):
+            continue
+        if read_team_metadata(profile_name).get("removed"):
+            continue
+        if is_standalone_profile(profile_name):
+            continue
+        soul = read_soul(profile_name)
+        if soul:
+            harvested.update(harvest_open_ids(soul))
+    return harvested
 
 
 def update_soul_md_open_ids(soul_path: str | Path, open_id_mapping: dict[str, str]) -> bool:

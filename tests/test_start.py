@@ -291,5 +291,22 @@ def test_start_warns_when_default_env_unreadable(tmp_hermes_home, fake_hermes_bi
     result = CliRunner().invoke(cli, ["start", "--prefix", "team"])
 
     assert result.exit_code == 0, result.output
-    assert "unreadable or empty" in result.output
+    assert "exists but is unreadable" in result.output
     assert "NOT included in the uniqueness scan" in result.output
+
+
+def test_start_no_warning_for_readable_default_env_without_app_id(
+    tmp_hermes_home, fake_hermes_bin, monkeypatch
+):
+    """A readable ~/.hermes/.env with no FEISHU_APP_ID (empty/comments/model
+    keys) hides no duplicate — start must not tell the user to fix
+    permissions on a file that is not broken (same verdict as verify)."""
+    _make_profile(tmp_hermes_home, "team-pm", "cli_aaa")
+    (tmp_hermes_home / ".env").write_text("# model only\nMODEL_API_KEY=sk\n")
+    monkeypatch.setattr("subprocess.run", FakeRun(version_output="hermes 0.22.2"))
+
+    result = CliRunner().invoke(cli, ["start", "--prefix", "team"])
+
+    assert result.exit_code == 0, result.output
+    assert "unreadable" not in result.output
+    assert "Fix its permissions" not in result.output

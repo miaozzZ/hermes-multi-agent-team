@@ -198,8 +198,12 @@ def _read_live_host_record() -> dict | None:
     from hermes_multi_agent_team.utils.profile import get_hermes_home
 
     try:
-        record = json.loads((get_hermes_home() / "gateway_state.json").read_text())
-    except (OSError, ValueError):
+        # Explicit utf-8 (like every other read in this package): under a
+        # C/POSIX locale read_text() defaults to ASCII and a record touched
+        # by a non-ASCII profile name would fail to decode — swallowed below
+        # into "host gateway not running" for verify/status.
+        record = json.loads((get_hermes_home() / "gateway_state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
         return None
     if not isinstance(record, dict):
         return None

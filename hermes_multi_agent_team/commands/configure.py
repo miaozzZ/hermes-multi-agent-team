@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass
 
 import click
 
 from hermes_multi_agent_team.utils.profile import (
+    is_standalone_profile,
     list_team_profiles,
     read_env,
+    team_metadata_corrupt,
     write_env,
 )
 
@@ -42,6 +45,16 @@ CREDENTIAL_FIELDS = (
     EnvField(APP_SECRET_KEY, "Feishu App Secret", "", secret=True),
 )
 
+# Standalone bots (new-bot) get the opposite default: they should stay quiet
+# unless explicitly @-mentioned. Kept as a named field so the shared-settings
+# flow can re-prompt it per standalone profile in mixed (team + bot) runs.
+_REQUIRE_MENTION_FIELD = EnvField(
+    "FEISHU_REQUIRE_MENTION",
+    "Require @mention",
+    "false",
+    confirm=True,
+)
+
 SETTINGS_FIELDS = (
     EnvField(
         "FEISHU_DOMAIN",
@@ -71,12 +84,7 @@ SETTINGS_FIELDS = (
         "all",
         choices=("none", "mentions", "all"),
     ),
-    EnvField(
-        "FEISHU_REQUIRE_MENTION",
-        "Require @mention",
-        "false",
-        confirm=True,
-    ),
+    _REQUIRE_MENTION_FIELD,
 )
 
 # FEISHU_ALLOWED_USERS must NOT be shared: open_ids are isolated per Feishu app,
@@ -116,15 +124,41 @@ def _prompt_field(field: EnvField, current: str) -> str:
 
 
 def _prompt_settings(
-    existing: dict[str, str | None], fields: tuple[EnvField, ...] = SETTINGS_FIELDS
+    existing: dict[str, str | None],
+    fields: tuple[EnvField, ...] = SETTINGS_FIELDS,
+    default_overrides: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Prompt for the given settings fields, defaulting to each key's existing value."""
+    overrides = default_overrides or {}
     values: dict[str, str] = {}
     click.echo("\n  ⚙️  Platform settings")
     for field in fields:
-        current = existing.get(field.key) or field.default
+        current = existing.get(field.key) or overrides.get(field.key, field.default)
         values[field.key] = _prompt_field(field, current)
     return values
+
+
+def _bot_like_profile(profile_name: str) -> bool:
+    """A standalone bot (new-bot) — or a profile failing closed as one.
+
+    An unreadable .hermes-team.json may hide a standalone marker, so such
+    profiles get the bot treatment (standalone mention default, never the
+    shared-settings reference) instead of plain team defaults.
+    """
+    return is_standalone_profile(profile_name) or team_metadata_corrupt(profile_name)
+
+
+def _standalone_defaults(profile_name: str) -> dict[str, str]:
+    """Default overrides for a standalone bot (new-bot).
+
+    Team members listen to every group message (bot @s in plain text are not
+    real mentions); a single-function bot is the opposite — it should stay
+    quiet unless explicitly @-mentioned. Profiles with unreadable metadata
+    fail closed into the same default (_bot_like_profile).
+    """
+    if _bot_like_profile(profile_name):
+        return {"FEISHU_REQUIRE_MENTION": "true"}
+    return {}
 
 
 def _prompt_unique_app_id(
@@ -197,6 +231,15 @@ def configure_team(prefix: str, dry_run: bool) -> None:
         "   ⚠️  Every agent needs its own Feishu app — one app_id can only serve "
         "one Hermes instance."
     )
+    for name in profiles:
+        if team_metadata_corrupt(name):
+            # Fail closed: the file may hide a standalone marker, so this
+            # profile gets the bot treatment (mention default true, never the
+            # shared-settings reference) instead of plain team defaults.
+            click.echo(
+                f"   ⚠️  {name}: unreadable .hermes-team.json — it may be a standalone "
+                "bot; it gets standalone defaults (Require @mention=true)"
+            )
     if dry_run:
         click.echo("   📋 DRY RUN — no changes will be made")
 
@@ -205,9 +248,26 @@ def configure_team(prefix: str, dry_run: bool) -> None:
         default=True,
     )
 
+    # Whether EVERY profile in this run is bot-like (standalone, or failing
+    # closed as one). The shared mention default flips to true only in that
+    # case: in a mixed run (team members + bots sharing the prefix) it must
+    # stay the team's false — each bot gets its own mention prompt below
+    # instead, so neither side inherits the other's default.
+    all_standalone = all(_bot_like_profile(p) for p in profiles)
+
     shared_settings: dict[str, str] = {}
     if share_settings:
-        shared_settings = _prompt_settings(read_env(profiles[0]))
+        # Shared settings take their defaults from a TEAM profile when one is
+        # present: a standalone bot sorting first may carry a bot-specific
+        # FEISHU_REQUIRE_MENTION=true in its .env, which must not leak into
+        # the whole team's shared default (same for a corrupt-metadata
+        # profile). An all-bot-like run keeps using the first profile and
+        # flips the mention default.
+        reference = next((p for p in profiles if not _bot_like_profile(p)), profiles[0])
+        shared_settings = _prompt_settings(
+            read_env(reference),
+            default_overrides=_standalone_defaults(reference) if all_standalone else {},
+        )
 
     configured: dict[str, dict[str, str]] = {}
     used_app_ids: dict[str, str] = {}
@@ -223,10 +283,27 @@ def configure_team(prefix: str, dry_run: bool) -> None:
         env_vars: dict[str, str] = {APP_ID_KEY: app_id, APP_SECRET_KEY: app_secret}
         if share_settings:
             env_vars.update(shared_settings)
+            if not all_standalone and _bot_like_profile(profile_name):
+                # Mixed run: the shared Require @mention answer defaulted to
+                # the team's false — re-ask just this key for the bot-like
+                # profile (standalone, or unreadable metadata failing closed)
+                # with its own default (true), keeping any value already in
+                # its .env.
+                current = existing.get("FEISHU_REQUIRE_MENTION") or "true"
+                value = click.confirm(
+                    f"    Require @mention for standalone bot {profile_name} "
+                    f"({_REQUIRE_MENTION_FIELD.key})",
+                    default=current.lower() == "true",
+                )
+                env_vars["FEISHU_REQUIRE_MENTION"] = str(value).lower()
             env_vars.update(_prompt_settings(existing, PER_PROFILE_SETTINGS_FIELDS))
         else:
             env_vars.update(
-                _prompt_settings(existing, SETTINGS_FIELDS + PER_PROFILE_SETTINGS_FIELDS)
+                _prompt_settings(
+                    existing,
+                    SETTINGS_FIELDS + PER_PROFILE_SETTINGS_FIELDS,
+                    default_overrides=_standalone_defaults(profile_name),
+                )
             )
 
         if env_vars.get("FEISHU_GROUP_POLICY") == "allowlist" and not env_vars.get(
@@ -255,10 +332,29 @@ def configure_team(prefix: str, dry_run: bool) -> None:
                 display_v = "****" if _is_sensitive_key(key) else value
                 click.echo(f"     {key}={display_v}")
         else:
-            write_env(profile_name, env_vars)
+            try:
+                tightened = write_env(profile_name, env_vars)
+            except OSError as e:
+                # The user has already answered every prompt — a raw
+                # traceback here (e.g. an unwritable directory) hides what
+                # failed. Nothing was written for THIS profile; earlier
+                # profiles in the loop keep their completed writes.
+                raise click.ClickException(
+                    f"❌ Could not write {profile_name}/.env: {e}\n"
+                    "   Check the directory's permissions (chmod u+w if needed) and "
+                    "re-run configure."
+                ) from e
             click.echo(f"  ✅ .env written for {profile_name}")
+            if tightened:
+                # It carries the App Secret — a group/other-readable mode
+                # (0644/0664, e.g. from an older version or a manual write)
+                # exposes it to other local users on every reconfigure.
+                click.echo(
+                    f"     🔒 Tightened {profile_name}/.env permissions to 0600 "
+                    "(was group/other-readable)"
+                )
 
     click.echo(
         f"\n✅ Configuration complete: {len(configured)}/{len(profiles)} profiles configured"
     )
-    click.echo(f"\n📋 Next step: hermes-team start --prefix {prefix}")
+    click.echo(f"\n📋 Next step: hermes-team start --prefix {shlex.quote(prefix)}")

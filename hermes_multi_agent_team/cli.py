@@ -5,6 +5,24 @@ import click
 from hermes_multi_agent_team import __version__
 
 
+def _prefix_param(ctx: click.Context, param: click.Parameter, value: str | None) -> str | None:
+    """Entry gate for every --prefix value: non-empty after stripping.
+
+    An empty/blank prefix would otherwise flow into list_team_profiles and
+    match OTHER teams' profiles ("" startswith-matches everything; " "
+    matches any name with a leading space) — remove-member/destroy would
+    target them. Stripping matches validate_prefix's normalization.
+    """
+    if value is None:
+        return value
+    cleaned = value.strip()
+    if not cleaned:
+        raise click.BadParameter(
+            "must be a non-empty string (an empty prefix would match other teams' profiles)"
+        )
+    return cleaned
+
+
 @click.group()
 @click.version_option(version=__version__, prog_name="hermes-team")
 def cli() -> None:
@@ -25,7 +43,12 @@ def cli() -> None:
     default=None,
     help="Comma-separated role keys, a subset of the team's roles (default: all of them).",
 )
-@click.option("--prefix", default=None, help="Profile name prefix (default: team name).")
+@click.option(
+    "--prefix",
+    default=None,
+    callback=_prefix_param,
+    help="Profile name prefix (default: team name).",
+)
 @click.option("--clone-from", default=None, help="Clone model config from this profile.")
 @click.option(
     "--config",
@@ -57,7 +80,9 @@ def init(
 
 
 @cli.command()
-@click.option("--prefix", required=True, help="Profile name prefix to configure.")
+@click.option(
+    "--prefix", required=True, callback=_prefix_param, help="Profile name prefix to configure."
+)
 @click.option("--dry-run", is_flag=True, help="Show what would be written without writing.")
 def configure(prefix: str, dry_run: bool) -> None:
     """⚙️  Interactively configure .env for each team profile."""
@@ -67,7 +92,7 @@ def configure(prefix: str, dry_run: bool) -> None:
 
 
 @cli.command()
-@click.option("--prefix", required=True, help="Profile name prefix.")
+@click.option("--prefix", required=True, callback=_prefix_param, help="Profile name prefix.")
 @click.option(
     "--standalone",
     is_flag=True,
@@ -83,7 +108,7 @@ def start(prefix: str, standalone: bool, dry_run: bool) -> None:
 
 
 @cli.command("collect-ids")
-@click.option("--prefix", required=True, help="Profile name prefix.")
+@click.option("--prefix", required=True, callback=_prefix_param, help="Profile name prefix.")
 def collect_ids(prefix: str) -> None:
     """🔍 Auto-extract Feishu open_ids from gateway logs and update SOUL.md."""
     from hermes_multi_agent_team.commands.collect_ids import collect_team_ids
@@ -92,7 +117,9 @@ def collect_ids(prefix: str) -> None:
 
 
 @cli.command("add-member")
-@click.option("--prefix", required=True, help="Profile name prefix of the team.")
+@click.option(
+    "--prefix", required=True, callback=_prefix_param, help="Profile name prefix of the team."
+)
 @click.option("--key", required=True, help="Role key (becomes profile name <prefix>-<key>).")
 @click.option("--name", required=True, help="Display name used in SOUL.md @tags (must be unique).")
 @click.option("--role", required=True, help="Job title.")
@@ -131,7 +158,9 @@ def add_member(
 
 
 @cli.command("remove-member")
-@click.option("--prefix", required=True, help="Profile name prefix of the team.")
+@click.option(
+    "--prefix", required=True, callback=_prefix_param, help="Profile name prefix of the team."
+)
 @click.option("--key", required=True, help="Role key of the member to remove.")
 @click.option(
     "--keep-profile",
@@ -158,8 +187,45 @@ def new_config(output_path: str | None) -> None:
     run_wizard(output_path)
 
 
+@cli.command("new-bot")
+@click.argument("name")
+@click.option("--display-name", default=None, help="Persona display name (default: same as NAME).")
+@click.option(
+    "--description",
+    default=None,
+    help="One-line function description (prompted when omitted).",
+)
+@click.option(
+    "--template",
+    default=None,
+    help="SOUL template: a file path or the builtin roster-free 'bot' template (default). "
+    "Team templates (pm/frontend/…) need a team roster and are rejected here.",
+)
+@click.option("--clone-from", default=None, help="Clone model config from this profile.")
+@click.option("--dry-run", is_flag=True, help="Show what would be created without doing it.")
+def new_bot(
+    name: str,
+    display_name: str | None,
+    description: str | None,
+    template: str | None,
+    clone_from: str | None,
+    dry_run: bool,
+) -> None:
+    """🤖 Create a standalone single-function agent (no team, served by the host gateway)."""
+    from hermes_multi_agent_team.commands.bot import new_bot as new_bot_impl
+
+    new_bot_impl(
+        name=name,
+        display_name=display_name,
+        description=description,
+        template=template,
+        clone_from=clone_from,
+        dry_run=dry_run,
+    )
+
+
 @cli.command()
-@click.option("--prefix", required=True, help="Profile name prefix.")
+@click.option("--prefix", required=True, callback=_prefix_param, help="Profile name prefix.")
 def verify(prefix: str) -> None:
     """✅ Verify team setup: gateways, .env, SOUL.md open_ids."""
     from hermes_multi_agent_team.commands.verify import verify_team
@@ -168,7 +234,7 @@ def verify(prefix: str) -> None:
 
 
 @cli.command()
-@click.option("--prefix", required=True, help="Profile name prefix.")
+@click.option("--prefix", required=True, callback=_prefix_param, help="Profile name prefix.")
 def status(prefix: str) -> None:
     """📊 Show team status overview."""
     from hermes_multi_agent_team.commands.status import team_status
@@ -185,7 +251,9 @@ def doctor() -> None:
 
 
 @cli.command()
-@click.option("--prefix", required=True, help="Profile name prefix to destroy.")
+@click.option(
+    "--prefix", required=True, callback=_prefix_param, help="Profile name prefix to destroy."
+)
 @click.option("--force", is_flag=True, help="Skip confirmation prompt.")
 def destroy(prefix: str, force: bool) -> None:
     """🗑️  Remove team profiles (with confirmation)."""

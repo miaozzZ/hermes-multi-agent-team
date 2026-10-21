@@ -215,3 +215,50 @@ def test_configure_warns_on_invalid_existing_choice(tmp_hermes_home):
     env = (tmp_hermes_home / "profiles" / "team-pm" / ".env").read_text()
     assert "FEISHU_DOMAIN=feishu" in env
     assert "FEISHU_DOMAIN=bogus" not in env
+
+
+def test_configure_tightens_loose_env_permissions(tmp_hermes_home):
+    """A pre-existing 0644 .env carrying the App Secret must not stay
+    group/world-readable after a reconfigure — write_env tightens it to 0600
+    and configure says so."""
+    _make_profile(
+        tmp_hermes_home,
+        "team-pm",
+        "FEISHU_APP_ID=cli_old\nFEISHU_APP_SECRET=old\nMODEL_API_KEY=sk-keepme\n",
+    )
+    env_path = tmp_hermes_home / "profiles" / "team-pm" / ".env"
+    env_path.chmod(0o644)
+
+    result = CliRunner().invoke(
+        cli,
+        ["configure", "--prefix", "team"],
+        input=_SHARED_SETTINGS_INPUT + _PROFILE_INPUT_DEFAULTS,
+    )
+    assert result.exit_code == 0, result.output
+
+    assert env_path.stat().st_mode & 0o777 == 0o600
+    assert "Tightened" in result.output
+    assert "0600" in result.output
+    # The tool-managed rewrite itself is unchanged.
+    assert "MODEL_API_KEY=sk-keepme" in env_path.read_text()
+
+
+def test_configure_reports_env_write_failure_cleanly(tmp_hermes_home, monkeypatch):
+    """An OSError from the final .env write (unwritable file, full disk…)
+    used to escape as a bare traceback after every prompt was answered —
+    surface it as a clean error naming the profile."""
+    _make_profile(tmp_hermes_home, "team-pm", "FEISHU_APP_ID=cli_old\nFEISHU_APP_SECRET=old\n")
+
+    def _boom(profile_name, env_vars):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr("hermes_multi_agent_team.commands.configure.write_env", _boom)
+
+    result = CliRunner().invoke(
+        cli,
+        ["configure", "--prefix", "team"],
+        input=_SHARED_SETTINGS_INPUT + _PROFILE_INPUT_DEFAULTS,
+    )
+    assert result.exit_code != 0
+    assert "Could not write team-pm/.env" in result.output
+    assert "Traceback" not in result.output
