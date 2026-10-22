@@ -33,3 +33,8 @@ htmlcov/
 # Distribution
 *.tar.gz
 *.whl
+
+# Agent-tool session artifacts (build backend is setuptools; no uv config
+# is declared — if uv is adopted later, un-ignore and commit uv.lock)
+.zcode/
+uv.lock

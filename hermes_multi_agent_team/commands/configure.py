@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import shlex
+import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import click
@@ -161,17 +163,133 @@ def _standalone_defaults(profile_name: str) -> dict[str, str]:
     return {}
 
 
+def _masked_key_loop(
+    read1: Callable[[], str],
+    echo: Callable[[str], None],
+    *,
+    extended_prefixes: tuple[str, ...] = (),
+    swallow_escape_sequences: bool = True,
+    backspace: tuple[str, ...] = ("\x7f", "\x08"),
+    ctrl_c_abort: bool = False,
+) -> str:
+    """Consume keystrokes from ``read1`` until Enter, echoing '*' per character.
+
+    Pure in its arguments so tests can drive it with a fake reader instead of
+    a real terminal. Escape sequences — arrow/Home/End keys arrive on a POSIX
+    TTY as CSI ('ESC [ …' + final byte 0x40–0x7e) or SS3 ('ESC O …') — are
+    swallowed whole: dropping only the ESC byte would let the sequence tail
+    ('[A' etc.) leak into the secret as seemingly-typed characters.
+    ``extended_prefixes``/``ctrl_c_abort`` model msvcrt (win32) semantics.
+    Backspace (DEL \\x7f or Ctrl-H \\x08) erases the last typed character.
+    """
+    chars: list[str] = []
+    pending: list[str] = []  # one-slot pushback for re-processing a character
+
+    def next_char() -> str:
+        if pending:
+            return pending.pop()
+        ch = read1()
+        if ch == "":
+            raise EOFError("stdin closed before Enter")
+        return ch
+
+    while True:
+        ch = next_char()
+        if ch in ("\r", "\n"):
+            break
+        if ch in extended_prefixes:
+            next_char()  # arrow/function keys send a second code
+            continue
+        if ch == "\x1b" and swallow_escape_sequences:
+            follow = next_char()
+            if follow in ("[", "O"):
+                # CSI/SS3: consume parameter bytes up to and including the
+                # final byte (0x40–0x7e) — e.g. up-arrow 'ESC [ A', Home
+                # 'ESC [ H', Ctrl+Right 'ESC [ 1 ; 5 C'. Enter/ESC abort the
+                # sequence (and get re-processed) and a 16-byte cap bounds the
+                # damage, so a stray '['/'O' after ESC can never silently eat
+                # the rest of the input — including the terminating Enter.
+                for _ in range(16):
+                    final = next_char()
+                    if final in ("\r", "\n", "\x1b"):
+                        pending.append(final)  # not sequence data — reprocess
+                        break
+                    if "\x40" <= final <= "\x7e":
+                        break
+                continue
+            # Lone ESC (or an Alt-modified key): drop the ESC itself and let
+            # the following character go through the normal handling.
+            pending.append(follow)
+            continue
+        if ch in backspace:
+            if chars:
+                chars.pop()
+                echo("\b \b")
+            continue
+        if ctrl_c_abort and ch == "\x03":
+            raise click.Abort
+        if ord(ch) < 32:
+            continue  # other control characters (incl. \x03 via signal)
+        chars.append(ch)
+        echo("*")
+    return "".join(chars)
+
+
+def _read_masked_line() -> str:
+    """Read one line from the terminal, echoing '*' per typed character.
+
+    Only meaningful on a real TTY (callers check isatty first): CI, pipes and
+    CliRunner take the hidden-prompt fallback instead. Backspace erases;
+    Ctrl-C aborts through the normal signal/click path.
+    """
+    if sys.platform == "win32":
+        import msvcrt
+
+        return _masked_key_loop(
+            msvcrt.getwch,
+            lambda text: click.echo(text, nl=False),
+            extended_prefixes=("\x00", "\xe0"),  # arrow/function key prefixes
+            swallow_escape_sequences=False,  # msvcrt reports those as prefixes
+            backspace=("\x08",),
+            ctrl_c_abort=True,
+        )
+
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old_attrs = termios.tcgetattr(fd)
+    try:
+        # TCSADRAIN (not tty.setcbreak's default TCSAFLUSH): TCSAFLUSH would
+        # silently discard keystrokes typed between the prompt being shown and
+        # this call taking effect — the secret would be missing its first
+        # characters with no feedback.
+        # ISIG stays on: Ctrl-C raises KeyboardInterrupt.
+        tty.setcbreak(fd, termios.TCSADRAIN)
+        return _masked_key_loop(
+            lambda: sys.stdin.read(1),
+            lambda text: click.echo(text, nl=False),
+            swallow_escape_sequences=True,
+        )
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+
+
 def _prompt_unique_app_id(
     profile_name: str, existing: dict[str, str | None], used_app_ids: dict[str, str]
 ) -> str:
-    """Prompt for this profile's Feishu App ID, enforcing one app per agent."""
+    """Prompt for this profile's Feishu App ID, enforcing one app per agent.
+
+    The value is stripped: a copy-pasted id with surrounding whitespace would
+    otherwise bypass the duplicate check (and never match at connect time).
+    """
     while True:
         app_id = str(
             click.prompt(
                 f"    Feishu App ID for {profile_name}",
                 default=existing.get(APP_ID_KEY) or "",
             )
-        )
+        ).strip()
         if not app_id:
             click.echo("    ❌ App ID cannot be empty")
             continue
@@ -190,19 +308,27 @@ def _prompt_unique_app_id(
 def _prompt_app_secret(profile_name: str, existing: dict[str, str | None]) -> str:
     """Prompt for this profile's Feishu App Secret.
 
-    The default (an existing secret) is never shown — not even as ``[sec1]`` —
-    so a real secret can never leak to the terminal or CI logs. Pressing Enter
-    keeps the existing secret; a profile without one must get a non-empty value.
+    On a real terminal every typed character echoes as '*' (blind typing with
+    zero feedback invites "did I paste anything?" doubt); pipes/CI keep the
+    plain hidden prompt. The default (an existing secret) is never shown —
+    not even as ``[sec1]`` — so a real secret can never leak to the terminal
+    or logs. Pressing Enter keeps the existing secret; a profile without one
+    must get a non-empty value. Surrounding whitespace (copy-paste) is
+    stripped.
     """
+    default = existing.get(APP_SECRET_KEY) or ""
+    label = f"    Feishu App Secret for {profile_name}"
     while True:
-        value = str(
-            click.prompt(
-                f"    Feishu App Secret for {profile_name}",
-                default=existing.get(APP_SECRET_KEY) or "",
-                hide_input=True,
-                show_default=False,
-            )
-        )
+        if sys.stdin.isatty():
+            click.echo(f"{label}: ", nl=False)
+            value = _read_masked_line().strip()
+            click.echo()
+        else:
+            value = str(
+                click.prompt(label, default=default, hide_input=True, show_default=False)
+            ).strip()
+        if not value and default:
+            return default  # bare Enter keeps the existing secret
         if value:
             return value
         click.echo("    ❌ App Secret cannot be empty")

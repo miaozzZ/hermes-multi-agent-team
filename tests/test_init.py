@@ -158,6 +158,198 @@ def test_reinit_preserves_collected_open_ids(tmp_hermes_home: Path, mock_subproc
     assert "ou_xxx_" not in after
 
 
+def test_reinit_preserves_per_profile_namespaces(tmp_hermes_home: Path, mock_subprocess_success):
+    """Same names, DIFFERENT ids per SOUL (each profile's own Feishu app
+    observed its own namespace — the real-world shape): a re-render must
+    give every SOUL back exactly its OWN ids. The old cross-profile harvest
+    merged all SOULs into one name→id map (last profile wins) and wrote one
+    app's namespace into every SOUL, breaking live @-mentions."""
+    runner = CliRunner()
+    first = runner.invoke(cli, ["init", "--team-name", "T", "--prefix", "t", "--roles", "pm,qa"])
+    assert first.exit_code == 0, first.output
+
+    # Simulate collect-ids having run for BOTH apps.
+    for profile, pm_id, qa_id in (
+        ("t-pm", "ou_pm1nAPPpm", "ou_qa1nAPPpm"),
+        ("t-qa", "ou_pm1nAPPqa", "ou_qa1nAPPqa"),
+    ):
+        soul_path = tmp_hermes_home / "profiles" / profile / "SOUL.md"
+        filled = soul_path.read_text(encoding="utf-8")
+        for placeholder, real in (("ou_xxx_pm", pm_id), ("ou_xxx_qa", qa_id)):
+            filled = filled.replace(placeholder, real)
+        soul_path.write_text(filled, encoding="utf-8")
+
+    rerun = runner.invoke(cli, ["init", "--team-name", "T", "--prefix", "t", "--roles", "pm,qa"])
+    assert rerun.exit_code == 0, rerun.output
+
+    pm_soul = (tmp_hermes_home / "profiles" / "t-pm" / "SOUL.md").read_text(encoding="utf-8")
+    assert 'user_id="ou_pm1nAPPpm"' in pm_soul and 'user_id="ou_qa1nAPPpm"' in pm_soul
+    assert "ou_pm1nAPPqa" not in pm_soul and "ou_qa1nAPPqa" not in pm_soul
+    qa_soul = (tmp_hermes_home / "profiles" / "t-qa" / "SOUL.md").read_text(encoding="utf-8")
+    assert 'user_id="ou_pm1nAPPqa"' in qa_soul and 'user_id="ou_qa1nAPPqa"' in qa_soul
+    assert "ou_pm1nAPPpm" not in qa_soul and "ou_qa1nAPPpm" not in qa_soul
+
+
+def test_init_clone_from_keeps_placeholders_not_source_ids(
+    tmp_hermes_home: Path, tmp_path: Path, monkeypatch
+):
+    """Hermes' `profile create --clone-from` copies the SOURCE profile's
+    SOUL.md — whose real ids belong to the SOURCE app's namespace. Those ids
+    must NOT be re-applied to the fresh render: only a profile that existed
+    BEFORE the run (re-run) has its ids harvested; a newly created profile
+    (clone included) keeps placeholders until its OWN app collects them."""
+    import shutil as shutil_mod
+    from subprocess import CompletedProcess
+
+    src = tmp_hermes_home / "profiles" / "src"
+    src.mkdir(parents=True)
+    (src / "SOUL.md").write_text(
+        "【飞书@方式】\n"
+        '- @P酱：`<at user_id="ou_sourceappP">P酱</at>`\n'
+        '- @主人：`<at user_id="ou_sourceappO">主人</at>`\n',
+        encoding="utf-8",
+    )
+    # A hermes stub whose profile create --clone-from mirrors the real clone
+    # (config.yaml/.env/SOUL.md of the source land in the new profile dir).
+    binary = tmp_path / "bin" / "hermes"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n")
+    monkeypatch.setattr("shutil.which", lambda name: str(binary) if name == "hermes" else None)
+
+    def fake_run(cmd, **kwargs):
+        if len(cmd) >= 4 and cmd[1:3] == ["profile", "create"] and "--clone-from" in cmd:
+            target = tmp_hermes_home / "profiles" / cmd[3]
+            target.mkdir(parents=True, exist_ok=True)
+            shutil_mod.copy(src / "SOUL.md", target / "SOUL.md")
+        return CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = CliRunner().invoke(
+        cli,
+        ["init", "--team-name", "T", "--prefix", "t", "--roles", "pm", "--clone-from", "src"],
+    )
+    assert result.exit_code == 0, result.output
+
+    soul = (tmp_hermes_home / "profiles" / "t-pm" / "SOUL.md").read_text(encoding="utf-8")
+    assert "ou_sourceappP" not in soul and "ou_sourceappO" not in soul
+    assert 'user_id="ou_xxx_pm">P酱' in soul  # placeholders — its OWN app collects later
+
+
+def test_init_failed_clone_run_cleans_up_and_retry_stays_clean(
+    tmp_hermes_home: Path, tmp_path: Path, monkeypatch
+):
+    """A failed FIRST run must not leave the just-created profile dir behind:
+    the leftover (with the --clone-from'd SOUL inside) would make the retry
+    see "existed" and harvest the SOURCE app's ids into the new profile —
+    same orphan-cleanup rule as add-member's render-failure path."""
+    import json as _json
+    import shutil as shutil_mod
+    from subprocess import CompletedProcess
+
+    src = tmp_hermes_home / "profiles" / "src"
+    src.mkdir(parents=True)
+    (src / "SOUL.md").write_text(
+        "【飞书@方式】\n"
+        '- @P酱：`<at user_id="ou_srcnsPM01">P酱</at>`\n'
+        '- @主人：`<at user_id="ou_srcnsOW01">主人</at>`\n',
+        encoding="utf-8",
+    )
+    binary = tmp_path / "bin" / "hermes"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n")
+    monkeypatch.setattr("shutil.which", lambda name: str(binary) if name == "hermes" else None)
+
+    def fake_run(cmd, **kwargs):
+        if len(cmd) >= 4 and cmd[1:3] == ["profile", "create"] and "--clone-from" in cmd:
+            target = tmp_hermes_home / "profiles" / cmd[3]
+            target.mkdir(parents=True, exist_ok=True)
+            shutil_mod.copy(src / "SOUL.md", target / "SOUL.md")
+        return CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    broken = tmp_path / "broken.md.j2"
+    broken.write_text("{{ 1/0 }}\n", encoding="utf-8")
+    cfg = tmp_path / "team.json"
+    cfg.write_text(
+        _json.dumps(
+            {
+                "team_name": "T",
+                "prefix": "t",
+                "roles": [
+                    {"key": "pm", "name": "P酱", "role": "产品经理", "template": str(broken)}
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    fail = CliRunner().invoke(cli, ["init", "--config", str(cfg), "--clone-from", "src"])
+    # Per-role failure with the documented non-zero exit (verify/doctor
+    # convention) — a clean report, not a traceback.
+    assert fail.exit_code == 1
+    assert "Failed to render template" in fail.output
+    assert "partially initialized" in fail.output
+    # The just-created (cloned) profile dir was removed — a retry starts fresh.
+    assert not (tmp_hermes_home / "profiles" / "t-pm").exists()
+
+    broken.write_text("你是{{ name }}\n", encoding="utf-8")
+    retry = CliRunner().invoke(cli, ["init", "--config", str(cfg), "--clone-from", "src"])
+    assert retry.exit_code == 0, retry.output
+    soul = (tmp_hermes_home / "profiles" / "t-pm" / "SOUL.md").read_text(encoding="utf-8")
+    assert "你是P酱" in soul  # the fixed template's render
+    assert "ou_srcnsPM01" not in soul and "ou_srcnsOW01" not in soul  # no source ids
+
+
+def test_reinit_refills_custom_heading_section(
+    tmp_hermes_home: Path, tmp_path: Path, mock_subprocess_success
+):
+    """Same heading-independence for init re-runs: a custom template's
+    【飞书@格式】 section keeps its collected ids across the re-render (the
+    re-apply matches <at> tags, not the bundled 【飞书@方式】 heading)."""
+    import json as _json
+
+    tpl = tmp_path / "custom.md.j2"
+    tpl.write_text(
+        "你是{{ name }}（{{ team_name }}的{{ role }}）\n"
+        "【飞书@格式】\n"
+        "{% for m in team_members %}"
+        '- @{{ m.name }}（{{ m.role }}）：`<at user_id="{{ m.open_id }}">{{ m.name }}</at>`\n'
+        "{% endfor %}"
+        '- @主人：`<at user_id="{{ owner_open_id }}">主人</at>`\n',
+        encoding="utf-8",
+    )
+    cfg = tmp_path / "team.json"
+    cfg.write_text(
+        _json.dumps(
+            {
+                "team_name": "T",
+                "prefix": "t",
+                "roles": [{"key": "pm", "name": "P酱", "role": "产品经理", "template": str(tpl)}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    first = runner.invoke(cli, ["init", "--config", str(cfg)])
+    assert first.exit_code == 0, first.output
+    # Simulate collect-ids having filled this profile's own id.
+    soul_path = tmp_hermes_home / "profiles" / "t-pm" / "SOUL.md"
+    filled = soul_path.read_text(encoding="utf-8").replace("ou_xxx_pm", "ou_pmOWNcust")
+    soul_path.write_text(filled, encoding="utf-8")
+
+    rerun = runner.invoke(cli, ["init", "--config", str(cfg)])
+    assert rerun.exit_code == 0, rerun.output
+
+    after = soul_path.read_text(encoding="utf-8")
+    assert "【飞书@格式】" in after
+    assert 'user_id="ou_pmOWNcust">P酱' in after  # id survived the re-render
+
+
 def test_init_never_hijacks_other_teams_profile(
     tmp_hermes_home: Path, tmp_path: Path, mock_subprocess_success
 ):

@@ -9,8 +9,12 @@ Both commands keep every member's SOUL.md roster in sync:
   Profiles kept on disk via ``remove-member --keep-profile`` carry a
   ``removed`` marker in their metadata and are skipped — a departed member
   must never be re-rendered back into the SOULs.
-- open_ids already collected into SOULs are harvested BEFORE any rewrite and
-  re-applied after, so adding a member never resets the team to placeholders.
+- open_ids already collected into a SOUL are harvested from THAT SOUL ONLY
+  before any rewrite and re-applied to it after — open_ids are per Feishu
+  app, so one member's ids are meaningless in a teammate's SOUL and are
+  never merged across profiles; a roster change thus never resets a SOUL to
+  placeholders, and a NEW member's fresh SOUL keeps placeholders until
+  collect-ids runs against its own app.
 - Each existing member's SOUL is re-rendered from its template when that
   template is recoverable (metadata template). When it is not (custom
   template whose file is gone, or a legacy pre-metadata profile — its team
@@ -47,7 +51,11 @@ from hermes_multi_agent_team.team_config import (
     make_role_spec,
 )
 from hermes_multi_agent_team.utils.gateway import find_hermes_bin
-from hermes_multi_agent_team.utils.open_id import harvest_team_open_ids, update_soul_md_open_ids
+from hermes_multi_agent_team.utils.open_id import (
+    atomic_write_text,
+    fill_placeholders_in_text,
+    harvest_own_soul_open_ids,
+)
 from hermes_multi_agent_team.utils.profile import (
     TEAM_METADATA_FILENAME,
     get_profile_dir,
@@ -388,7 +396,18 @@ def _patch_at_section(soul_path: Path, add_member: Member | None, remove_names: 
     Adds add_member's @-line (before the owner line) and drops the @-lines of
     remove_names, inside the 【飞书@方式】 section only. Returns True when the
     section was found and the file (possibly) changed.
+
+    Known limit: the section is located by the bundled 【飞书@方式】 heading,
+    so a custom-heading SOUL (e.g. 【飞书@格式】) — or a symlinked SOUL (never
+    written through) — returns False; the caller warns and the member's SOUL
+    is left untouched. That is the safe failure: ids are never lost (unlike
+    a re-render), the roster line just has to be added by hand or by
+    restoring the template / fixing the link.
     """
+    if soul_path.is_symlink():
+        # Same policy as every other SOUL write: never through a symlink
+        # (write_text would follow it and replace the target's content).
+        return False
     content = soul_path.read_text(encoding="utf-8")
     section_start = content.find("【飞书@方式】")
     if section_start == -1:
@@ -420,21 +439,20 @@ def _patch_at_section(soul_path: Path, add_member: Member | None, remove_names: 
         kept.insert(insert_at, new_line)
 
     new_content = content[:section_start] + "\n".join(kept) + content[section_end:]
-    soul_path.write_text(new_content, encoding="utf-8")
+    atomic_write_text(soul_path, new_content)
     return True
 
 
 # Shared with init (re-runs harvest before re-rendering): lives in
 # utils/open_id.py next to harvest_open_ids, so neither command module
 # imports the other for it.
-_harvest_team_ids = harvest_team_open_ids
+_harvest_own_soul_ids = harvest_own_soul_open_ids
 
 
 def _rebuild_souls(
     roster: list[Member],
     targets: list[Member],
     team_name: str,
-    harvested: dict[str, str],
     add_member: Member | None,
     remove_names: set[str],
     dry_run: bool,
@@ -445,6 +463,12 @@ def _rebuild_souls(
     departed member excluded) — every SOUL is rendered against it, including
     the new member's own (written separately by the caller). ``targets`` is
     the subset whose SOULs get rewritten here.
+
+    Each target's ids are preserved PER PROFILE: the map re-applied after a
+    re-render is harvested from THAT member's own pre-render SOUL only
+    (open_ids are per Feishu app — a teammate's SOUL holds a different
+    namespace for the same names, so a cross-profile merge would corrupt
+    every @-line it touched).
 
     Returns the number of profiles updated.
     """
@@ -458,6 +482,38 @@ def _rebuild_souls(
         soul_path = get_profile_dir(member.profile_name) / "SOUL.md"
         if not soul_path.exists():
             continue
+
+        # THIS SOUL's own ids (its app's namespace), harvested BEFORE any
+        # rewrite — the only map that may be re-applied to it afterwards.
+        own_ids = _harvest_own_soul_ids(member.profile_name)
+
+        def _try_patch(member: Member = member, soul_path: Path = soul_path) -> bool:
+            """One guarded, honestly-reported patch attempt for this SOUL.
+
+            True when the file changed; every failure mode (symlinked SOUL,
+            custom/missing section heading, unwritable dir, full disk) warns
+            with the member named — never silently skipped, never aborts the
+            team loop.
+            """
+            try:
+                if _patch_at_section(soul_path, add_member, remove_names):
+                    return True
+                reason = (
+                    "SOUL.md is a symlink"
+                    if soul_path.is_symlink()
+                    else "no 【飞书@方式】 section found (custom heading?)"
+                )
+                click.echo(
+                    f"  ⚠️  {member.profile_name}: could not patch its roster — "
+                    f"{reason}; its SOUL is unchanged (add the @-line by hand or "
+                    "restore its template/link)"
+                )
+            except OSError as e:
+                click.echo(
+                    f"  ⚠️  {member.profile_name}: could not patch its 【飞书@方式】 "
+                    f"section ({e}) — SOUL left as-is"
+                )
+            return False
 
         if _template_renderable(member):
             if dry_run:
@@ -474,17 +530,40 @@ def _rebuild_souls(
                 )
             except Exception as e:  # noqa: BLE001 — one member's broken template must not abort the team
                 click.echo(
-                    f"  ⚠️  {member.profile_name}: template render failed ({e}), "
-                    "patching 【飞书@方式】 only"
+                    f"  ⚠️  {member.profile_name}: template render failed ({e}) — "
+                    "trying a 【飞书@方式】-only patch"
                 )
-                if _patch_at_section(soul_path, add_member, remove_names):
-                    update_soul_md_open_ids(soul_path, harvested)
+                if _try_patch():
                     updated += 1
                 continue
-            soul_path.write_text(content, encoding="utf-8")
-            # Re-apply the ids collected earlier so a roster change never
-            # resets teammates' open_ids back to placeholders.
-            update_soul_md_open_ids(soul_path, harvested)
+            if soul_path.is_symlink():
+                # Same policy as atomic_write_text: never write through a
+                # symlink — the fresh placeholders would clobber the target's
+                # real ids and nothing could restore them. Skip with a
+                # warning; the SOUL keeps its old roster.
+                click.echo(
+                    f"  ⚠️  {member.profile_name}: SOUL.md is a symlink — skipped "
+                    "(writing would replace the target's ids); write the target "
+                    "or remove the link, then re-run"
+                )
+                continue
+            # Apply the member's OWN pre-render ids to the rendered CONTENT,
+            # then write once, atomically: a failed write leaves the SOUL
+            # exactly as it was — no truncated file, and no placeholder-only
+            # file either (the ids are already in the content, so there is no
+            # write→fill window to lose them in). Matching goes by <at> TAG,
+            # so custom section headings keep their ids like the bundled one.
+            try:
+                new_content, _ = fill_placeholders_in_text(content, own_ids)
+                atomic_write_text(soul_path, new_content)
+            except OSError as e:
+                # Unwritable directory / full disk — warn and keep going; one
+                # member's write failure must not abort the team loop.
+                click.echo(
+                    f"  ⚠️  {member.profile_name}: could not write its re-rendered "
+                    f"SOUL ({e}) — left as-is"
+                )
+                continue
             updated += 1
         else:
             if dry_run:
@@ -494,8 +573,9 @@ def _rebuild_souls(
                 )
                 updated += 1
                 continue
-            if _patch_at_section(soul_path, add_member, remove_names):
-                update_soul_md_open_ids(soul_path, harvested)
+            # _patch_at_section keeps existing @-lines (and their collected
+            # ids) verbatim — nothing to re-apply afterwards.
+            if _try_patch():
                 updated += 1
 
     return updated
@@ -586,9 +666,6 @@ def add_member(
     if dry_run:
         click.echo("   📋 DRY RUN — no changes will be made")
 
-    # Harvest BEFORE anything is rewritten.
-    harvested = _harvest_team_ids(profiles)
-
     # 1. Create the profile via hermes CLI (aborts on failure, before any
     #    SOUL is touched). A re-joining kept profile reuses its directory.
     if rejoining:
@@ -606,8 +683,18 @@ def add_member(
         if result.returncode != 0 and not dry_run:
             raise click.ClickException(f"❌ Failed to create profile '{new_profile}'")
 
-    # 2. New member's SOUL (rendered with the full roster; existing members'
-    #    harvested ids are applied right away) + metadata.
+    # 2. New member's SOUL (rendered with the full roster) + metadata.
+    #    A REJOINING kept profile still holds its own app's collected ids
+    #    (its profile dir and logs were kept by --keep-profile): harvest them
+    #    BEFORE the rewrite and re-apply after, or the rejoin silently resets
+    #    them to placeholders. A brand-new profile harvests NOTHING — even
+    #    with --clone-from, whose clone copies the SOURCE app's SOUL.md into
+    #    the new profile dir before this step runs: those ids belong to the
+    #    source app's namespace and must never reach this SOUL (collect-ids
+    #    never rewrites real ids, so they would stick forever). The fresh
+    #    placeholders are filled later by collect-ids with its own app
+    #    (next step 4 below).
+    own_ids = _harvest_own_soul_ids(new_profile) if rejoining else {}
     if not dry_run:
         roster = _roster_order(members + [new_member], hub)
         team_members = [m.as_team_member() for m in roster]
@@ -640,12 +727,29 @@ def add_member(
         # SOUL + metadata writes share the render failure's cleanup: an
         # OSError here (unwritable directory, full disk) used to escape as a
         # bare traceback AND leave a config.yaml-only orphan profile dir.
+        soul_written = False
         try:
             profile_dir = get_profile_dir(new_profile)
             profile_dir.mkdir(parents=True, exist_ok=True)
             soul_path = profile_dir / "SOUL.md"
-            soul_path.write_text(content, encoding="utf-8")
-            update_soul_md_open_ids(soul_path, harvested)
+            if soul_path.is_symlink():
+                # Never write THROUGH a symlink: write_text follows the link,
+                # so the fresh placeholders would clobber the target's real
+                # ids and nothing could restore them. The target survives
+                # untouched; its roster line is updated only by writing the
+                # target (or removing the link).
+                click.echo(
+                    f"  ⚠️  {new_profile}: SOUL.md is a symlink — its target is left "
+                    "as-is; write the target or remove the link, then re-run"
+                )
+            else:
+                # Apply the rejoining profile's OWN ids (empty map for a
+                # brand-new profile) to the rendered CONTENT, then write once,
+                # atomically — a failed write leaves nothing half-done. By
+                # <at> tag, so custom section headings keep their ids too.
+                new_content, _ = fill_placeholders_in_text(content, own_ids)
+                atomic_write_text(soul_path, new_content)
+                soul_written = True
             metadata = {
                 "key": spec.key,
                 "name": spec.name,
@@ -670,7 +774,12 @@ def add_member(
                 f"❌ Could not write SOUL/metadata for {new_profile}: {e}\n"
                 "   Check the profile directory's permissions/free space and retry."
             ) from e
-        click.echo(f"  ✅ {new_profile}: SOUL.md + metadata written")
+        if soul_written:
+            click.echo(f"  ✅ {new_profile}: SOUL.md + metadata written")
+        else:
+            # The symlink branch above already warned; report what DID happen
+            # (metadata only — the SOUL itself was deliberately not written).
+            click.echo(f"  ✅ {new_profile}: metadata written; SOUL.md (symlink) left as-is")
         # A tombstone from an earlier remove-member (delete mode) would keep
         # hiding the freshly re-added profile from list_team_profiles and
         # collect-ids even though this command just rebuilt it.
@@ -686,12 +795,12 @@ def add_member(
     else:
         click.echo(f"  💨 dry-run: would generate SOUL.md + metadata for {new_profile}")
 
-    # 3. Teammates' SOULs learn the new roster member.
+    # 3. Teammates' SOULs learn the new roster member (each keeping its OWN
+    #    app-namespace ids — see _rebuild_souls).
     updated = _rebuild_souls(
         _roster_order(members + [new_member], hub),
         members,
         team_name,
-        harvested,
         add_member=new_member,
         remove_names=set(),
         dry_run=dry_run,
@@ -755,11 +864,6 @@ def remove_member(
     elif not force:
         click.confirm(f"⚠️  Remove {target.name}? Their profile will be {disposition}", abort=True)
 
-    # Harvest BEFORE the deletion (the departing SOUL may hold the only copy
-    # of some teammate's id... it doesn't — ids live in every SOUL — but
-    # harvesting first is free and order-safe).
-    harvested = _harvest_team_ids(profiles)
-
     remaining = [m for m in members if m is not target]
 
     if keep_profile:
@@ -812,7 +916,6 @@ def remove_member(
         _roster_order(remaining, remaining_hub),
         remaining,
         team_name,
-        harvested,
         add_member=None,
         remove_names={target.name},
         dry_run=dry_run,

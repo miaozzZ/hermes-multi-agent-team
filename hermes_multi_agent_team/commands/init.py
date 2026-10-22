@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import shutil
 import subprocess
 import sys
 from importlib import resources
@@ -22,7 +23,11 @@ from hermes_multi_agent_team.team_config import (
     validate_prefix,
 )
 from hermes_multi_agent_team.utils.gateway import find_hermes_bin
-from hermes_multi_agent_team.utils.open_id import harvest_team_open_ids, update_soul_md_open_ids
+from hermes_multi_agent_team.utils.open_id import (
+    atomic_write_text,
+    fill_placeholders_in_text,
+    harvest_own_soul_open_ids,
+)
 from hermes_multi_agent_team.utils.profile import (
     TEAM_METADATA_FILENAME,
     get_profile_dir,
@@ -167,11 +172,18 @@ def _create_profile(
     clone_from: str | None,
     metadata: dict,
     dry_run: bool,
-    harvested_ids: dict[str, str] | None = None,
 ) -> bool:
     """Create one profile (hermes CLI) + SOUL.md + team metadata. True on success."""
-    # Check if profile already exists
-    if profile_exists(profile_name):
+    # Whether the profile existed BEFORE this run — the gate for harvesting
+    # ids below. Only a PRE-EXISTING SOUL may be harvested and re-applied
+    # (re-run case): a profile created by THIS run — INCLUDING via
+    # --clone-from, whose clone copies the SOURCE profile's SOUL.md — must
+    # not, because the cloned ids belong to the source app's namespace and
+    # are wrong for this profile's own app (collect-ids never rewrites real
+    # ids, so they would stick forever). A fresh profile keeps placeholders,
+    # filled later by collect-ids with its own app.
+    existed = profile_exists(profile_name)
+    if existed:
         click.echo(f"  ⚠️  Profile '{profile_name}' already exists, skipping creation")
     else:
         cmd = [hermes_bin, "profile", "create", profile_name]
@@ -183,30 +195,64 @@ def _create_profile(
             return False
 
     if not dry_run:
+
+        def _cleanup_created() -> None:
+            # This run created the profile (hermes CLI — possibly with a
+            # --clone-from'd SOUL inside) but never finished writing ours:
+            # remove the orphan dir, or a retry would see "existed" and
+            # harvest the leftover CLONED SOUL's source-app ids into the
+            # new profile (same rule as add_member's _cleanup_orphan).
+            # Pre-existing profiles are NEVER cleaned up.
+            if existed:
+                return
+            profile_dir = get_profiles_dir() / profile_name
+            shutil.rmtree(profile_dir, ignore_errors=True)
+            if profile_dir.exists():
+                click.echo(
+                    f"  ⚠️  Could not remove just-created profile dir "
+                    f"'{profile_name}' — delete it manually before retrying"
+                )
+
         try:
             soul_content = render_soul(env, template_name, template_path, context)
             profile_dir = get_profiles_dir() / profile_name
             profile_dir.mkdir(parents=True, exist_ok=True)
             soul_path = profile_dir / "SOUL.md"
-            soul_path.write_text(soul_content, encoding="utf-8")
-            # Re-apply the open_ids harvested from the team's existing SOULs
-            # (see init_team): re-running init must never reset already
-            # collected @-mentions back to placeholders — same guarantee
-            # add/remove-member give. A no-op for a first init (empty map).
-            if harvested_ids:
-                update_soul_md_open_ids(soul_path, harvested_ids)
+            # THIS profile's own ids — only when the profile pre-existed this
+            # run (re-run): the map re-applied to the render is harvested
+            # from the SOUL that was there BEFORE the rewrite (open_ids are
+            # per Feishu app; a cross-profile merge — or a --clone-from'd
+            # SOUL — would write another app's namespace into this profile).
+            own_ids = harvest_own_soul_open_ids(profile_name) if existed else {}
+            if soul_path.is_symlink():
+                # Never write THROUGH a symlink (write_text follows it): the
+                # fresh placeholders would clobber the target's real ids and
+                # nothing could restore them. The target keeps its roster;
+                # metadata below still refreshes.
+                click.echo(
+                    f"  ⚠️  {profile_name}: SOUL.md is a symlink — its target is "
+                    "left as-is; write the target or remove the link, then re-run"
+                )
+            else:
+                # Apply the profile's own ids to the rendered CONTENT, then
+                # write once, atomically — a failed write leaves the previous
+                # SOUL exactly as it was (no truncation, no placeholder-only
+                # file). By <at> TAG, so custom section headings (e.g.
+                # 【飞书@格式】) keep their ids like the bundled 【飞书@方式】.
+                new_content, _ = fill_placeholders_in_text(soul_content, own_ids)
+                atomic_write_text(soul_path, new_content)
+                click.echo(f"  ✅ Generated SOUL.md ({len(soul_content)} bytes)")
             metadata_path = profile_dir / TEAM_METADATA_FILENAME
             metadata_path.write_text(
                 json.dumps({**metadata, "team": team_name, "prefix": prefix}, ensure_ascii=False)
                 + "\n",
                 encoding="utf-8",
             )
-            click.echo(f"  ✅ Generated SOUL.md ({len(soul_content)} bytes)")
             # A stale tombstone (profiles/.deleted/<name>) would keep hiding
             # the freshly (re-)created profile from listings and collect-ids.
-            # Caught here, separately from the render handler below: the
-            # profile IS written — a tombstone failure is a warning, not a
-            # per-role failure.
+            # Caught here, separately from the handlers below: the profile IS
+            # written — a tombstone failure is a warning, not a per-role
+            # failure.
             try:
                 if remove_tombstone(profile_name):
                     click.echo(f"  🧹 Removed stale tombstone profiles/.deleted/{profile_name}")
@@ -216,13 +262,21 @@ def _create_profile(
                     "     Delete it manually — until then the profile stays hidden from "
                     "collect-ids/verify"
                 )
+        # A write failure (unwritable dir, full disk) is reported as what it
+        # is — the render may have succeeded — and still cleans up a profile
+        # this run created.
+        except OSError as e:
+            click.echo(f"  ❌ Could not write SOUL.md/metadata for '{profile_name}': {e}")
+            _cleanup_created()
+            return False
         # Any render-time failure becomes a per-role failure, not an uncaught
-        # crash: OSError/UnicodeError on reading or writing, jinja2 errors,
-        # or an exception raised BY a custom template's code ({{ 1/0 }} →
-        # ZeroDivisionError). KeyboardInterrupt/SystemExit still propagate
-        # (they derive from BaseException, not Exception).
+        # crash: UnicodeError on reading, jinja2 errors, or an exception
+        # raised BY a custom template's code ({{ 1/0 }} → ZeroDivisionError).
+        # KeyboardInterrupt/SystemExit still propagate (they derive from
+        # BaseException, not Exception).
         except Exception as e:  # noqa: BLE001 — deliberate: see comment above
             click.echo(f"  ❌ Failed to render template: {e}")
+            _cleanup_created()
             return False
     else:
         click.echo(f"  💨 dry-run: would generate SOUL.md from {template_name}")
@@ -596,15 +650,15 @@ def init_team(
     owner_open_id = "ou_xxx_owner"  # placeholder
     env = get_jinja_env()
 
-    # Harvest the open_ids already collected into the team's existing SOULs
-    # BEFORE any rewrite and re-apply them after each render below: re-running
-    # init re-renders every selected member's SOUL with placeholder ids, which
-    # used to silently break live @-mentions until collect-ids was re-run —
-    # add/remove-member keep this guarantee for roster changes; init now does
-    # too. (harvest_team_open_ids lives in utils/open_id.py precisely so this
-    # is a plain module-level import — member.py imports THIS module at load
-    # time, so importing member back would be a cycle.)
-    harvested_ids = harvest_team_open_ids(list_team_profiles(prefix))
+    # Ids already collected into a profile's SOUL are preserved PER PROFILE on
+    # re-render: _create_profile (and the identity re-render below) harvests
+    # each SOUL's OWN ids before the rewrite and re-applies them after —
+    # re-running init must never reset collected @-mentions back to
+    # placeholders, and (open_ids being per Feishu app) must never write one
+    # app's namespace into another profile's SOUL. add/remove-member keep the
+    # same guarantee; the harvest helper lives in utils/open_id.py so this
+    # stays a plain module-level import (member.py imports THIS module, so
+    # importing member back would be a cycle).
 
     success_count = 0
     fail_count = 0
@@ -730,7 +784,6 @@ def init_team(
                 "hub": hub_meta,
             },
             dry_run=dry_run,
-            harvested_ids=harvested_ids,
         )
         if ok:
             success_count += 1
@@ -763,9 +816,9 @@ def init_team(
         # still reference the OLD roster — an old-hub @-line is a placeholder
         # collect-ids can never fill, and verify's hub exemption follows the
         # (refreshed) metadata, so a stale line would fail forever. Re-render
-        # those SOULs from their recorded templates (same context/harvested
-        # ids as everything above); a template that no longer resolves keeps
-        # its SOUL as-is, with a warning naming the actual fix.
+        # those SOULs from their recorded templates (same context; each SOUL's
+        # own ids re-applied as everywhere above); a template that no longer
+        # resolves keeps its SOUL as-is, with a warning naming the actual fix.
         new_identity = (team_name, json.dumps(hub_meta, sort_keys=True, ensure_ascii=False))
         for profile_name in roster_metadata_profiles:
             if old_identity.get(profile_name) == new_identity:
@@ -807,8 +860,37 @@ def init_team(
                     "keep failing for it until fixed)"
                 )
                 continue
-            soul_path.write_text(content, encoding="utf-8")
-            update_soul_md_open_ids(soul_path, harvested_ids)
+            # This SOUL's own ids (its app's namespace) survive the
+            # re-render — harvested before the rewrite and applied to the
+            # rendered CONTENT (never a teammate's namespace: per-app id
+            # isolation). These members pre-exist on disk by construction, so
+            # the harvest is always legitimate here (no --clone-from case).
+            # By <at> tag, so custom section headings keep their ids too.
+            own_ids = harvest_own_soul_open_ids(profile_name)
+            if soul_path.is_symlink():
+                # Same policy as everywhere a rendered SOUL is written: never
+                # write through a symlink — the placeholders would clobber
+                # the target's real ids and nothing could restore them.
+                click.echo(
+                    f"  ⚠️  {profile_name}: SOUL.md is a symlink — skipped "
+                    "(writing would replace the target's ids); write the target "
+                    "or remove the link, then re-run"
+                )
+                continue
+            try:
+                # Ids applied to the content, then one atomic write: a failed
+                # write leaves the SOUL exactly as it was — no truncation, no
+                # placeholder-only file.
+                new_content, _ = fill_placeholders_in_text(content, own_ids)
+                atomic_write_text(soul_path, new_content)
+            except OSError as e:
+                # The SOUL on disk is untouched — warn and keep going; one
+                # member's write failure must not abort the loop.
+                click.echo(
+                    f"  ⚠️  {profile_name}: could not write its re-rendered "
+                    f"SOUL ({e}) — keeps the OLD roster lines"
+                )
+                continue
             click.echo(f"  🔄 {profile_name}: SOUL re-rendered to the current roster")
 
     # Summary

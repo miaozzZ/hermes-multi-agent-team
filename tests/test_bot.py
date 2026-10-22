@@ -158,7 +158,11 @@ def test_collect_ids_skips_standalone_sharing_team_prefix(tmp_hermes_home, tmp_p
     result = CliRunner().invoke(cli, ["collect-ids", "--prefix", "team"])
     assert result.exit_code == 0, result.output
     assert "team-sign: standalone bot, skipping" in result.output
-    assert "P酱 → ou_botpm" in result.output
+    # The team member's own @-line got filled from its own log (per-profile
+    # reporting format; the standalone bot contributed nothing).
+    assert "sources: sender=1" in result.output
+    pm_soul = (tmp_hermes_home / "profiles" / "team-pm" / "SOUL.md").read_text()
+    assert 'user_id="ou_botpm">P酱' in pm_soul
 
 
 def test_member_roster_ignores_standalone_sharing_prefix(tmp_hermes_home, tmp_path, monkeypatch):

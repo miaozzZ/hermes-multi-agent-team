@@ -254,7 +254,7 @@ Options:
 ```
 
 行为说明：
-- 每个角色单独输入 **Feishu App ID / App Secret**，工具强制查重（一个 app_id 只能服务一个 Hermes 实例）
+- 每个角色单独输入 **Feishu App ID / App Secret**，工具强制查重（一个 app_id 只能服务一个 Hermes 实例）；终端上 Secret 逐字符回显 `*`，支持退格（方向键等转义序列被忽略），凭证输入自动去除首尾空白（含全角空格）；管道/CI 仍走隐藏输入
 - 域名、连接模式、群策略（`FEISHU_GROUP_POLICY`）、允许的机器人等公共设置默认只询问一次、应用到全部 profile
 - `FEISHU_ALLOWED_USERS` 例外：open_id 是 **per-app 隔离**的，无法跨 profile 共用，因此对每个角色单独询问（若群策略选了 `allowlist` 而名单留空，该 bot 会拒收所有群消息，工具会给出警告）
 - 写入 `.env` 时会**保留**工具不管理的键（如模型 API Key），并清理已废弃的变量（`FEISHU_DM_POLICY`；`FEISHU_ALLOW_ALL_USERS` 仍被 Hermes 0.22.x 读取，会原样保留）
@@ -283,19 +283,28 @@ hermes gateway status               # 查看 host 网关状态
 
 ### `hermes-team collect-ids`
 
-从 Gateway 日志自动提取 per-app open_id 并更新 SOUL.md。
+为每个 profile 的 SOUL.md 回填 open_id（按 profile 独立、幂等）。
 
 ```bash
 hermes-team collect-ids [OPTIONS]
 
 Options:
   --prefix TEXT    Profile 名称前缀  [required]
+  --via-api        用每个 profile 自己的 App 凭证读群历史（推荐点名制团队使用）
+  --chat-id TEXT   群 chat_id（oc_xxx），仅与 --via-api 搭配（单独使用报用法错误）；
+                   缺省取各 profile 日志里最新的群聊 chat_id
+                   （无群聊行时才退回任意会话；非法值直接报用法错误）
 ```
 
-**原理：**
-- 读取每个 Profile 的 `logs/gateway.log`
-- 正则匹配 `sender=bot:ou_xxx` 和 `sender=user:ou_xxx`
-- 自动更新 SOUL.md 中 `【飞书@方式】` 的 open_id
+**命名空间规则（正确性核心）**：open_id 只在观察到它的 App 里有效，所以每个 profile 的 SOUL **只**用它自己观测到的 id 回填——绝不跨 profile 合并。
+
+**四个数据来源**（优先级 api > mention > sender > log，见各 profile 报告的 sources 分布）：
+- `--via-api`：用该 profile 的 App 凭证换 token 调飞书 API 读**群消息历史**，从结构化 mentions 数组提取（完整不截断、无需发新消息）。缺 `im:message.group_msg` 权限时会打印该 App 的一键授权链接；顺带用群信息接口补齐 `@主人` 的 open_id（该接口缺权限时只跳过 `@主人`，已取到的 mentions 不受影响）。API 域名跟随 profile 的 `FEISHU_DOMAIN`（lark 团队走 open.larksuite.com）
+- **mention 日志**：点名制（`FEISHU_REQUIRE_MENTION=true`，省 token 推荐模式）下入站日志的 `[Mentioned: 名字 (open_id=ou_xxx)]` 条目——名字逐字保留（括号后缀是命名的一部分、名字里的逗号也不会截断）、接收方自身被剔除、120 字符截断的残缺条目自动跳过
+- **sender 日志**：自由模式下该 profile 日志里的 `sender=bot:ou_xxx`（自己的 id，自己的命名空间）
+- **主人日志**：入站元数据行里的 `sender=user:ou_xxx` 回填 `@主人`（仅当日志中只观测到**唯一一个**真人 id 时；出现多个真人时无法判定谁是主人，跳过并提示改用 `--via-api` 或手填）。消息正文里出现的 chat_id/sender 不会被当作元数据
+
+**幂等**：只替换 `ou_xxx` 占位符，已手工回填/已收集的真实 id 永不改写，重跑安全。每个 profile 如实报告：填了几个、还剩几个占位符、来源分布（"还剩几个"与 `verify` 同口径——`@主人` 与渲染用总管的占位符按设计豁免，不计入缺口）。
 
 ### `hermes-team add-member`
 
@@ -518,10 +527,10 @@ hermes-team init --config my-team.json
 - `team_name` / `prefix`：可选默认值，命令行参数优先
 - `roles`：每个角色需要 `key`（进入 profile 名 `<prefix>-<key>`，限字母/数字/`-`/`_`）、`name`（SOUL 与 collect-ids 回填 open_id 的匹配名，**必须全局唯一**）、`role`（职位）；`nickname` 缺省等于 `name`
 - `coordinator`：可选。声明后 init 会**一并创建总管 profile** 并渲染总管 SOUL（不声明则沿用旧行为：不建总管 profile，总管由你的主 profile 担任）
-- `coordinator_fallback`：可选，与 `coordinator` **互斥**（两者同时声明会在加载时报错）。声明一个 **render-only 总管条目**（`name` 必填；`role` 缺省 `总管`，`nickname` 缺省 `name`）：只进入 `team_members` 供成员 @（内置模板要求「只 @总管 汇报」），不建 profile、不参与 open_id 自动回填；名称须与角色名互异。内置默认团队自带的这一条目为 `M总`
+- `coordinator_fallback`：可选，与 `coordinator` **互斥**（两者同时声明会在加载时报错）。声明一个 **render-only 总管条目**（`name` 必填；`role` 缺省 `总管`，`nickname` 缺省 `name`）：只进入 `team_members` 供成员 @（内置模板要求「只 @总管 汇报」），不建 profile（其占位符 open_id 与普通成员一样，collect-ids **观测到该名字时自动回填**；未观测到时与主人行一样豁免缺口统计，verify 不因此失败）；名称须与角色名互异。内置默认团队自带的这一条目为 `M总`
 - `template`：自定义角色必须指定。可以是相对 config 文件的**模板文件路径**（完全自定义人设；只相对 config 所在目录解析，不回退当前目录），也可以复用内置模板的短名（`pm`/`frontend`/`backend`/`qa`/`designer`/`coordinator`/`bot`——`bot` 为无【飞书@方式】的简洁模板，团队渲染时以 `role` 文本充当 `description`、身份句自称该团队的单职责成员，`verify` 对它跳过 open_id 检查）；内置 5 角色（pm/fe/be/qa/ui）不写则用默认模板
 
-init 会在每个 profile 里写入 `.hermes-team.json` 元数据，`collect-ids` 据此适配自定义角色名（**声明 coordinator 时**总管的 open_id 也自动回填），旧团队（无元数据）自动回退到内置角色表；`verify` 对占位符 open_id 的识别按 `ou_xxx` 前缀、天然适配任意角色名，它只读元数据的 standalone 标记与模板名（standalone bot 与 roster-free `bot` 模板成员跳过 open_id 名单检查）。注意：**声明了 `coordinator_fallback` 的团队（以及内置默认团队）**才有 render-only 总管占位（无 profile/元数据），其 open_id **不参与自动回填**，需要时手动填写；两者都未声明的自定义团队 roster 中没有任何总管条目。
+init 会在每个 profile 里写入 `.hermes-team.json` 元数据，`collect-ids` 据此适配自定义角色名（**声明 coordinator 时**总管的 open_id 也自动回填），旧团队（无元数据）自动回退到内置角色表；`verify` 对占位符 open_id 的识别按 `ou_xxx` 前缀、天然适配任意角色名，它只读元数据的 standalone 标记与模板名（standalone bot 与 roster-free `bot` 模板成员跳过 open_id 名单检查）。注意：**声明了 `coordinator_fallback` 的团队（以及内置默认团队）**才有 render-only 总管占位（无 profile/元数据），其 open_id 会在 collect-ids **观测到时自动回填**（群历史/日志提及即填；未观测到的占位符豁免缺口统计，需要时也可手动填写）；两者都未声明的自定义团队 roster 中没有任何总管条目。
 
 自定义 SOUL 模板是 Jinja2，可用变量：
 - `{{ name }}` / `{{ nickname }}` / `{{ role }}` — 本角色的显示名/小名/职位
@@ -530,7 +539,7 @@ init 会在每个 profile 里写入 `.hermes-team.json` 元数据，`collect-ids
 - `{{ team_members }}` — 团队成员列表（`name`/`nickname`/`role`/`open_id`），声明 coordinator 时总管排第一；不声明时若声明了 `coordinator_fallback`（或内置默认团队自带的 `M总`）则该 render-only 总管条目排第一，否则只含声明的角色（注意：内置模板要求成员「只 @总管 汇报」，建议声明 `coordinator` 或 `coordinator_fallback`，否则成员没有可 @ 的总管条目，init 也会给出警告）
 - `{{ owner_open_id }}` — 主人 open_id 占位
 
-> 提示：人设正文要保留 `【飞书@方式】` 小节并使用 `{% for member in team_members %}` 循环生成 `<at user_id="{{ member.open_id }}">...</at>`，collect-ids 才能自动回填 open_id。
+> 提示：人设正文使用 `{% for member in team_members %}` 循环生成 `<at user_id="{{ member.open_id }}">...</at>` 标签，collect-ids 就能自动回填 open_id。回填只认 `<at>` 标签、**不要求固定的小节标题**——内置模板的 `【飞书@方式】` 小节即满足，自定义标题（如 `【飞书@格式】`）同样有效。
 
 内置模板位于 `hermes_multi_agent_team/templates/SOUL/`（coordinator/pm/frontend/backend/qa/designer/bot），可直接复制一份改写。
 

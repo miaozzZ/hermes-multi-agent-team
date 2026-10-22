@@ -74,6 +74,10 @@ def _make_member(
 def test_add_member_syncs_rosters_and_keeps_collected_ids(
     tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    """Cross-profile open_id isolation on roster re-render: each SOUL holds
+    ITS OWN app's namespace (same teammate, different id per app — like real
+    Feishu), and a re-render must preserve exactly those, never a merged
+    map."""
     _fake_hermes(tmp_path, monkeypatch)
     _make_member(
         tmp_hermes_home,
@@ -82,7 +86,8 @@ def test_add_member_syncs_rosters_and_keeps_collected_ids(
         "P酱",
         "产品经理",
         "pm.md.j2",
-        soul_at_names={"P酱": "ou_realpm", "Q宝": "ou_realqa"},
+        # ids as observed by PM's own Feishu app
+        soul_at_names={"P酱": "ou_pm1nAPPpm", "Q宝": "ou_qa1nAPPpm"},
     )
     _make_member(
         tmp_hermes_home,
@@ -91,7 +96,8 @@ def test_add_member_syncs_rosters_and_keeps_collected_ids(
         "Q宝",
         "测试QA",
         "qa.md.j2",
-        soul_at_names={"P酱": "ou_realpm", "Q宝": "ou_realqa"},
+        # SAME names, DIFFERENT namespace — QA's own app observed these
+        soul_at_names={"P酱": "ou_pm1nAPPqa", "Q宝": "ou_qa1nAPPqa"},
     )
 
     result = CliRunner().invoke(
@@ -119,17 +125,520 @@ def test_add_member_syncs_rosters_and_keeps_collected_ids(
     assert meta["name"] == "阿写" and meta["template"] == "pm.md.j2"
 
     # Existing members' SOULs were re-rendered: new roster member present,
-    # previously collected open_ids preserved (not reset to placeholders).
+    # and each SOUL kept EXACTLY its own app-namespace ids.
     pm_soul = (tmp_hermes_home / "profiles" / "team-pm" / "SOUL.md").read_text()
     assert "阿写" in pm_soul
-    assert 'user_id="ou_realpm">P酱' in pm_soul
-    assert 'user_id="ou_realqa">Q宝' in pm_soul
+    assert 'user_id="ou_pm1nAPPpm">P酱' in pm_soul
+    assert 'user_id="ou_qa1nAPPpm">Q宝' in pm_soul
+    assert "ou_pm1nAPPqa" not in pm_soul and "ou_qa1nAPPqa" not in pm_soul
     qa_soul = (tmp_hermes_home / "profiles" / "team-qa" / "SOUL.md").read_text()
-    assert "阿写" in qa_soul and 'user_id="ou_realpm"' in qa_soul
+    assert "阿写" in qa_soul
+    assert 'user_id="ou_pm1nAPPqa">P酱' in qa_soul and 'user_id="ou_qa1nAPPqa">Q宝' in qa_soul
+    assert "ou_pm1nAPPpm" not in qa_soul and "ou_qa1nAPPpm" not in qa_soul
 
-    # The new member's SOUL already carries teammates' real ids.
+    # The new member's app has observed NOTHING yet — its SOUL keeps
+    # placeholders (any teammate id written here would be a foreign
+    # namespace); collect-ids fills them from its own app later.
     writer_soul = (writer_dir / "SOUL.md").read_text()
-    assert 'user_id="ou_realpm">P酱' in writer_soul
+    assert 'user_id="ou_xxx_pm">P酱' in writer_soul
+    assert "ou_pm1nAPP" not in writer_soul and "ou_qa1nAPP" not in writer_soul
+
+
+def test_rejoin_kept_profile_preserves_its_own_collected_ids(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A kept (removed) profile re-joining under the same key keeps its OWN
+    app-namespace ids across the re-add: its profile dir and logs were never
+    deleted, so resetting the SOUL to placeholders would throw away ids
+    collect-ids may not be able to recover (hand-filled, log rotated)."""
+    _fake_hermes(tmp_path, monkeypatch)
+    _make_member(
+        tmp_hermes_home,
+        "team-pm",
+        "pm",
+        "P酱",
+        "产品经理",
+        "pm.md.j2",
+        soul_at_names={"P酱": "ou_pm1nAPPpm"},
+    )
+    _make_member(
+        tmp_hermes_home,
+        "team-writer",
+        "writer",
+        "阿写",
+        "内容创作",
+        "pm.md.j2",
+        # ids as observed by the writer's own app (its own line + a teammate)
+        soul_at_names={"P酱": "ou_pm1nAPPwrt", "阿写": "ou_wr1t3r0wn"},
+    )
+    rm = CliRunner().invoke(
+        cli, ["remove-member", "--prefix", "team", "--key", "writer", "--force", "--keep-profile"]
+    )
+    assert rm.exit_code == 0, rm.output
+
+    add = CliRunner().invoke(
+        cli,
+        [
+            "add-member",
+            "--prefix",
+            "team",
+            "--key",
+            "writer",
+            "--name",
+            "阿写",
+            "--role",
+            "内容创作",
+            "--template",
+            "pm",
+        ],
+    )
+    assert add.exit_code == 0, add.output
+
+    writer_soul = (tmp_hermes_home / "profiles" / "team-writer" / "SOUL.md").read_text()
+    assert 'user_id="ou_wr1t3r0wn">阿写' in writer_soul  # own line kept its id
+    assert 'user_id="ou_pm1nAPPwrt">P酱' in writer_soul  # teammate id, own namespace
+    assert 'user_id="ou_xxx_writer">阿写' not in writer_soul  # not reset to placeholder
+
+
+def test_rebuild_refills_custom_heading_section(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Custom templates name the @ roster section differently (the real
+    whisage team uses 【飞书@格式】): a re-render's id re-apply must match
+    <at> TAGS, not the bundled 【飞书@方式】 heading — the old section-bound
+    update silently dropped every harvested id on such teams."""
+    _fake_hermes(tmp_path, monkeypatch)
+    tpl = tmp_path / "custom.md.j2"
+    tpl.write_text(
+        "你是{{ name }}（{{ team_name }}的{{ role }}）\n"
+        "【飞书@格式】\n"
+        "{% for m in team_members %}"
+        '- @{{ m.name }}（{{ m.role }}）：`<at user_id="{{ m.open_id }}">{{ m.name }}</at>`\n'
+        "{% endfor %}"
+        '- @主人：`<at user_id="{{ owner_open_id }}">主人</at>`\n',
+        encoding="utf-8",
+    )
+    _make_member(
+        tmp_hermes_home,
+        "team-pm",
+        "pm",
+        "P酱",
+        "产品经理",
+        str(tpl),
+        soul_at_names={"P酱": "ou_pmOWNcust", "Q宝": "ou_qaINcust"},
+    )
+    _make_member(tmp_hermes_home, "team-qa", "qa", "Q宝", "测试QA", "qa.md.j2")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "add-member",
+            "--prefix",
+            "team",
+            "--key",
+            "fe",
+            "--name",
+            "F仔",
+            "--role",
+            "前端开发",
+            "--template",
+            "frontend",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    pm_soul = (tmp_hermes_home / "profiles" / "team-pm" / "SOUL.md").read_text()
+    assert "【飞书@格式】" in pm_soul  # re-rendered from the custom template
+    assert 'user_id="ou_pmOWNcust">P酱' in pm_soul  # own ids restored …
+    assert 'user_id="ou_qaINcust">Q宝' in pm_soul  # … under the custom heading
+    assert "F仔" in pm_soul  # new roster member present (placeholder id)
+
+
+def test_add_member_clone_from_keeps_placeholders_not_source_ids(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Hermes' `profile create --clone-from` copies the SOURCE profile's
+    SOUL.md (source-app namespace) into the new member's dir BEFORE step 2
+    runs — the unconditional harvest used to freeze those ids into the fresh
+    render. Only a REJOINING kept profile may harvest; a brand-new profile
+    (clone included) keeps placeholders for its own collect-ids."""
+    import shutil as shutil_mod
+    from subprocess import CompletedProcess
+
+    src = tmp_hermes_home / "profiles" / "src"  # outside the team prefix
+    src.mkdir(parents=True)
+    (src / "SOUL.md").write_text(
+        "【飞书@方式】\n"
+        '- @P酱：`<at user_id="ou_srcnsPM01">P酱</at>`\n'
+        '- @主人：`<at user_id="ou_srcnsOW01">主人</at>`\n',
+        encoding="utf-8",
+    )
+    binary = tmp_path / "bin" / "hermes"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n")
+    monkeypatch.setattr("shutil.which", lambda name: str(binary) if name == "hermes" else None)
+
+    def fake_run(cmd, **kwargs):
+        # Mirror the real clone: the source's SOUL.md lands in the new dir.
+        if len(cmd) >= 4 and cmd[1:3] == ["profile", "create"] and "--clone-from" in cmd:
+            target = tmp_hermes_home / "profiles" / cmd[3]
+            target.mkdir(parents=True, exist_ok=True)
+            shutil_mod.copy(src / "SOUL.md", target / "SOUL.md")
+        return CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    _make_member(tmp_hermes_home, "team-pm", "pm", "P酱", "产品经理", "pm.md.j2")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "add-member",
+            "--prefix",
+            "team",
+            "--key",
+            "writer",
+            "--name",
+            "阿写",
+            "--role",
+            "内容创作",
+            "--template",
+            "pm",
+            "--clone-from",
+            "src",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    soul = (tmp_hermes_home / "profiles" / "team-writer" / "SOUL.md").read_text()
+    assert "ou_srcnsPM01" not in soul and "ou_srcnsOW01" not in soul
+    assert 'user_id="ou_xxx_writer">阿写' in soul  # placeholders until ITS app collects
+
+
+def test_rebuild_skips_symlinked_soul_target_untouched(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A symlinked SOUL.md must never be written THROUGH: write_text follows
+    the link, so the re-render's placeholders would clobber the target's real
+    ids while the (refusing) fill could not restore them. Skip with a
+    warning; teammates still get their roster update."""
+    _fake_hermes(tmp_path, monkeypatch)
+    _make_member(tmp_hermes_home, "team-pm", "pm", "P酱", "产品经理", "pm.md.j2")
+    # Replace team-pm's SOUL.md with a symlink whose target holds real ids.
+    pm_dir = tmp_hermes_home / "profiles" / "team-pm"
+    target = pm_dir / "real-soul.md"
+    target.write_text(
+        "【飞书@方式】\n"
+        '- @P酱：`<at user_id="ou_pm0wnreal">P酱</at>`\n'
+        '- @Q宝：`<at user_id="ou_qainpmreal">Q宝</at>`\n',
+        encoding="utf-8",
+    )
+    (pm_dir / "SOUL.md").unlink()
+    (pm_dir / "SOUL.md").symlink_to(target)
+    _make_member(tmp_hermes_home, "team-qa", "qa", "Q宝", "测试QA", "qa.md.j2")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "add-member",
+            "--prefix",
+            "team",
+            "--key",
+            "fe",
+            "--name",
+            "F仔",
+            "--role",
+            "前端开发",
+            "--template",
+            "frontend",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "SOUL.md is a symlink — skipped" in result.output
+    # The target is untouched: real ids intact, no roster rewrite through the link.
+    after = target.read_text(encoding="utf-8")
+    assert 'user_id="ou_pm0wnreal">P酱' in after
+    assert "F仔" not in after
+    assert (pm_dir / "SOUL.md").is_symlink()
+    # The non-symlink teammate still got its roster update.
+    qa_soul = (tmp_hermes_home / "profiles" / "team-qa" / "SOUL.md").read_text()
+    assert "F仔" in qa_soul
+
+
+def test_rebuild_write_failure_warns_and_continues(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """An OSError while writing one member's re-rendered SOUL (unwritable dir,
+    full disk) must degrade to a per-profile warning — not a bare traceback
+    aborting the whole team loop."""
+    _fake_hermes(tmp_path, monkeypatch)
+    _make_member(
+        tmp_hermes_home,
+        "team-pm",
+        "pm",
+        "P酱",
+        "产品经理",
+        "pm.md.j2",
+        soul_at_names={"P酱": "ou_pm1nwrite"},
+    )
+    _make_member(tmp_hermes_home, "team-qa", "qa", "Q宝", "测试QA", "qa.md.j2")
+    pm_soul_before = (tmp_hermes_home / "profiles" / "team-pm" / "SOUL.md").read_text()
+
+    real_write = Path.write_text
+
+    def _fail_pm(self, data, encoding=None, errors=None, newline=None):
+        # Match the ATOMIC writer's temp path too (SOUL.md.tmp): the real
+        # SOUL.md is never written in place any more.
+        if self.parent.name == "team-pm" and self.name.startswith("SOUL.md"):
+            raise OSError(28, "No space left on device")
+        return real_write(self, data, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(Path, "write_text", _fail_pm)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "add-member",
+            "--prefix",
+            "team",
+            "--key",
+            "fe",
+            "--name",
+            "F仔",
+            "--role",
+            "前端开发",
+            "--template",
+            "frontend",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Traceback" not in result.output
+    assert "could not write its re-rendered SOUL" in result.output
+    # pm's SOUL is intact (atomic write — never truncated in place) and no
+    # temp file was left behind; the later teammate was still re-rendered.
+    assert (tmp_hermes_home / "profiles" / "team-pm" / "SOUL.md").read_text() == pm_soul_before
+    assert not (tmp_hermes_home / "profiles" / "team-pm" / "SOUL.md.tmp").exists()
+    assert "F仔" in (tmp_hermes_home / "profiles" / "team-qa" / "SOUL.md").read_text()
+
+
+def test_rebuild_write_never_truncates_target_in_place(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The re-render must go through tmp+os.replace: a write_text that
+    truncates the target and THEN fails (the mid-write ENOSPC shape) used to
+    leave a 0-byte SOUL while the guard claimed "left as-is"."""
+    _fake_hermes(tmp_path, monkeypatch)
+    _make_member(
+        tmp_hermes_home,
+        "team-pm",
+        "pm",
+        "P酱",
+        "产品经理",
+        "pm.md.j2",
+        soul_at_names={"P酱": "ou_pmnevrTRU"},
+    )
+    _make_member(tmp_hermes_home, "team-qa", "qa", "Q宝", "测试QA", "qa.md.j2")
+    pm_soul_before = (tmp_hermes_home / "profiles" / "team-pm" / "SOUL.md").read_text()
+
+    real_write = Path.write_text
+
+    def _truncating_write(self, data, encoding=None, errors=None, newline=None):
+        if self.parent.name == "team-pm" and self.name == "SOUL.md":
+            self.write_bytes(b"")  # what open('w') does before a mid-write failure
+            raise OSError(28, "No space left on device")
+        return real_write(self, data, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(Path, "write_text", _truncating_write)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "add-member",
+            "--prefix",
+            "team",
+            "--key",
+            "fe",
+            "--name",
+            "F仔",
+            "--role",
+            "前端开发",
+            "--template",
+            "frontend",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    pm_soul = (tmp_hermes_home / "profiles" / "team-pm" / "SOUL.md").read_text()
+    # The truncating write_text was never invoked on the target (the atomic
+    # path wrote SOUL.md.tmp instead): the SOUL is NOT empty — it is the
+    # proper re-render, with the member's own id preserved and the new
+    # roster member present.
+    assert pm_soul
+    assert pm_soul != pm_soul_before or "F仔" in pm_soul  # re-render happened
+    assert 'user_id="ou_pmnevrTRU">P酱' in pm_soul
+    assert "F仔" in pm_soul
+
+
+def test_patch_failure_warns_and_continues(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Unrecoverable template + unwritable profile dir: the 【飞书@方式】 patch
+    used to escape as a bare PermissionError, aborting the whole team loop
+    after the new profile had already been created — now a per-profile
+    warning, and the writable teammates still update."""
+    import os as os_mod
+
+    _fake_hermes(tmp_path, monkeypatch)
+    # Recorded external template no longer resolves → patch-only path.
+    _make_member(
+        tmp_hermes_home,
+        "team-pm",
+        "pm",
+        "P酱",
+        "产品经理",
+        "/nonexistent/custom-pm.md.j2",
+        soul_at_names={"P酱": "ou_pmpatch1"},
+    )
+    _make_member(tmp_hermes_home, "team-qa", "qa", "Q宝", "测试QA", "qa.md.j2")
+    pm_soul_before = (tmp_hermes_home / "profiles" / "team-pm" / "SOUL.md").read_text()
+    pm_dir = tmp_hermes_home / "profiles" / "team-pm"
+    os_mod.chmod(pm_dir, 0o555)  # atomic write's tmp file cannot be created
+    try:
+        result = CliRunner().invoke(
+            cli,
+            [
+                "add-member",
+                "--prefix",
+                "team",
+                "--key",
+                "fe",
+                "--name",
+                "F仔",
+                "--role",
+                "前端开发",
+                "--template",
+                "frontend",
+            ],
+        )
+    finally:
+        os_mod.chmod(pm_dir, 0o755)
+    assert result.exit_code == 0, result.output
+    assert "Traceback" not in result.output
+    assert "could not patch its 【飞书@方式】 section" in result.output
+    assert "Permission denied" in result.output
+    # pm's SOUL is unchanged; the writable teammate was still re-rendered.
+    assert (pm_dir / "SOUL.md").read_text() == pm_soul_before
+    assert "F仔" in (tmp_hermes_home / "profiles" / "team-qa" / "SOUL.md").read_text()
+
+
+def test_patch_custom_heading_unrecoverable_template_warns(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Custom-heading SOUL (【飞书@格式】) + unrecoverable template: the patch
+    finds no section and used to return False SILENTLY — add-member still
+    said "teammate SOUL(s) updated" while the member's roster never changed.
+    The skip must be a visible warning naming the member and the fix."""
+    _fake_hermes(tmp_path, monkeypatch)
+    pm_dir = tmp_hermes_home / "profiles" / "team-pm"
+    pm_dir.mkdir(parents=True)
+    (pm_dir / ".hermes-team.json").write_text(
+        json.dumps(
+            {
+                "key": "pm",
+                "name": "P酱",
+                "nickname": "P酱",
+                "role": "产品经理",
+                "coordinator": False,
+                "team": "T",
+                "prefix": "team",
+                "template": "/nonexistent/custom.md.j2",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    pm_soul = '【飞书@格式】\n- @P酱：`<at user_id="ou_pmOWNcust">P酱</at>`\n'
+    (pm_dir / "SOUL.md").write_text(pm_soul, encoding="utf-8")
+    _make_member(tmp_hermes_home, "team-qa", "qa", "Q宝", "测试QA", "qa.md.j2")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "add-member",
+            "--prefix",
+            "team",
+            "--key",
+            "fe",
+            "--name",
+            "F仔",
+            "--role",
+            "前端开发",
+            "--template",
+            "frontend",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "could not patch its roster" in result.output
+    assert "no 【飞书@方式】 section found (custom heading?)" in result.output
+    # The custom-heading SOUL is untouched (safe failure — ids never lost)…
+    assert (pm_dir / "SOUL.md").read_text() == pm_soul
+    # …while the bundled-heading teammate got the roster update.
+    assert "F仔" in (tmp_hermes_home / "profiles" / "team-qa" / "SOUL.md").read_text()
+
+
+def test_rejoin_with_symlinked_soul_reports_accurately(
+    tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Re-joining a kept profile whose SOUL.md is a symlink: the command used
+    to print the symlink warning AND "✅ SOUL.md + metadata written" in the
+    same breath. The success line must say what actually happened (metadata
+    only); the target keeps its roster and ids."""
+    _fake_hermes(tmp_path, monkeypatch)
+    _make_member(tmp_hermes_home, "team-pm", "pm", "P酱", "产品经理", "pm.md.j2")
+    writer_dir = tmp_hermes_home / "profiles" / "team-writer"
+    _make_member(tmp_hermes_home, "team-writer", "writer", "阿写", "内容创作", "pm.md.j2")
+    target = writer_dir / "real-soul.md"
+    target.write_text(
+        "【飞书@方式】\n"
+        '- @P酱：`<at user_id="ou_pmINwrt">P酱</at>`\n'
+        '- @阿写：`<at user_id="ou_wr1t3r0wn">阿写</at>`\n',
+        encoding="utf-8",
+    )
+    (writer_dir / "SOUL.md").unlink()
+    (writer_dir / "SOUL.md").symlink_to(target)
+    target_before = target.read_text(encoding="utf-8")
+
+    rm = CliRunner().invoke(
+        cli, ["remove-member", "--prefix", "team", "--key", "writer", "--force", "--keep-profile"]
+    )
+    assert rm.exit_code == 0, rm.output
+
+    add = CliRunner().invoke(
+        cli,
+        [
+            "add-member",
+            "--prefix",
+            "team",
+            "--key",
+            "writer",
+            "--name",
+            "阿写",
+            "--role",
+            "内容创作",
+            "--template",
+            "pm",
+        ],
+    )
+    assert add.exit_code == 0, add.output
+    assert "SOUL.md is a symlink" in add.output
+    # The success line no longer claims the SOUL was written.
+    assert "SOUL.md + metadata written" not in add.output
+    assert "metadata written; SOUL.md (symlink) left as-is" in add.output
+    # The rejoin still completes (metadata: removal marker cleared) …
+    w_meta = json.loads((writer_dir / ".hermes-team.json").read_text())
+    assert not w_meta.get("removed")
+    # …while the link and its target keep their roster and real ids.
+    assert (writer_dir / "SOUL.md").is_symlink()
+    assert target.read_text(encoding="utf-8") == target_before
 
 
 def test_add_member_rejects_duplicate_key_and_name(
@@ -969,11 +1478,12 @@ def test_init_recreates_profile_clears_tombstone(
     assert list_team_profiles("t") == ["t-pm"]
 
 
-def test_harvest_skips_removed_profiles(
+def test_removed_profiles_stale_ids_never_propagate(
     tmp_hermes_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """A kept-but-removed profile's SOUL may carry stale open_ids; the
-    last-profile-wins harvest merge must not push them into every SOUL."""
+    """A kept-but-removed profile's SOUL may carry stale open_ids; the roster
+    re-render must never push them into any SOUL — nor any OTHER profile's
+    ids, because each SOUL only ever gets back its own harvested map."""
     _fake_hermes(tmp_path, monkeypatch)
     _make_member(
         tmp_hermes_home,
@@ -984,7 +1494,8 @@ def test_harvest_skips_removed_profiles(
         "pm.md.j2",
         soul_at_names={"P酱": "ou_fresh11"},
     )
-    # Sorts AFTER team-pm, so without the filter its stale id wins the merge.
+    # Sorts AFTER team-pm; without the removed-marker filter its stale id
+    # would leak into other SOULs.
     _make_member(
         tmp_hermes_home,
         "team-zz",
@@ -1017,9 +1528,13 @@ def test_harvest_skips_removed_profiles(
     )
     assert result.exit_code == 0, result.output
 
-    for profile in ("team-pm", "team-writer"):
-        soul = (tmp_hermes_home / "profiles" / profile / "SOUL.md").read_text()
-        assert 'user_id="ou_fresh11">P酱' in soul
+    # team-pm keeps its OWN id across the re-render; team-writer (new, has
+    # observed nothing) keeps its placeholder; the stale id is nowhere.
+    pm_soul = (tmp_hermes_home / "profiles" / "team-pm" / "SOUL.md").read_text()
+    assert 'user_id="ou_fresh11">P酱' in pm_soul
+    writer_soul = (tmp_hermes_home / "profiles" / "team-writer" / "SOUL.md").read_text()
+    assert 'user_id="ou_xxx_pm">P酱' in writer_soul
+    for soul in (pm_soul, writer_soul):
         assert "ou_stale99" not in soul
 
 
@@ -1821,10 +2336,10 @@ def test_add_member_write_failure_cleans_orphan_profile(
     _fake_hermes(tmp_path, monkeypatch)
     _make_member(tmp_hermes_home, "team-pm", "pm", "P酱", "产品经理", "pm.md.j2")
 
-    def _boom(soul_path, mapping):
+    def _boom(self, data, encoding=None, errors=None, newline=None):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr("hermes_multi_agent_team.commands.member.update_soul_md_open_ids", _boom)
+    monkeypatch.setattr(Path, "write_text", _boom)
 
     result = CliRunner().invoke(
         cli,

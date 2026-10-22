@@ -1,8 +1,12 @@
 """Main CLI entry point for hermes-multi-agent-team."""
 
+import re
+
 import click
 
 from hermes_multi_agent_team import __version__
+
+_CHAT_ID_RE = re.compile(r"^oc_[0-9A-Za-z]+$")
 
 
 def _prefix_param(ctx: click.Context, param: click.Parameter, value: str | None) -> str | None:
@@ -19,6 +23,23 @@ def _prefix_param(ctx: click.Context, param: click.Parameter, value: str | None)
     if not cleaned:
         raise click.BadParameter(
             "must be a non-empty string (an empty prefix would match other teams' profiles)"
+        )
+    return cleaned
+
+
+def _chat_id_param(ctx: click.Context, param: click.Parameter, value: str | None) -> str | None:
+    """Entry gate for --chat-id: must be a Feishu chat id (oc_ + alnum).
+
+    Anything else (spaces, quotes, a pasted URL fragment…) is rejected here
+    with a usage error — it would otherwise reach http.client as a malformed
+    URL and crash the command with an InvalidURL traceback.
+    """
+    if value is None:
+        return value
+    cleaned = value.strip()
+    if not _CHAT_ID_RE.match(cleaned):
+        raise click.BadParameter(
+            "must be a Feishu chat id like oc_xxxxxxxxx (letters/digits only, no spaces)"
         )
     return cleaned
 
@@ -109,11 +130,32 @@ def start(prefix: str, standalone: bool, dry_run: bool) -> None:
 
 @cli.command("collect-ids")
 @click.option("--prefix", required=True, callback=_prefix_param, help="Profile name prefix.")
-def collect_ids(prefix: str) -> None:
-    """🔍 Auto-extract Feishu open_ids from gateway logs and update SOUL.md."""
+@click.option(
+    "--via-api",
+    is_flag=True,
+    help="Read group message history via the Feishu API with each profile's own app "
+    "credentials (complete mentions, no new messages needed; needs the "
+    "im:message.group_msg scope — the tool prints a one-click grant link if missing).",
+)
+@click.option(
+    "--chat-id",
+    default=None,
+    callback=_chat_id_param,
+    help="Group chat id (oc_xxx) for --via-api; default: latest GROUP chat_id in "
+    "each profile's gateway log (any chat id only when no group line exists).",
+)
+def collect_ids(prefix: str, via_api: bool, chat_id: str | None) -> None:
+    """🔍 Fill each profile's SOUL.md open_ids from its own logs (or the API)."""
+    if chat_id is not None and not via_api:
+        # Fail fast instead of silently ignoring: --chat-id only feeds the
+        # --via-api history request, and a caller passing it without the flag
+        # believes the API route ran when only logs were parsed.
+        raise click.UsageError(
+            "--chat-id only applies together with --via-api; add --via-api or drop --chat-id"
+        )
     from hermes_multi_agent_team.commands.collect_ids import collect_team_ids
 
-    collect_team_ids(prefix=prefix)
+    collect_team_ids(prefix=prefix, via_api=via_api, chat_id=chat_id)
 
 
 @cli.command("add-member")

@@ -1,5 +1,86 @@
 # Changelog
 
+## [0.9.0] - 2026-10-22
+
+### 🔍 collect-ids 重写：点名制团队可用 + 命名空间正确性修复（破坏性）
+
+实机部署实证：点名制（`FEISHU_REQUIRE_MENTION=true`，省 token 推荐模式）下入站消息在准入层即被拒，`sender=bot:` 日志行几乎不积累，旧版 collect-ids 永远输出 0 条；且旧的"全局映射"设计在 open_id 按 App 命名空间隔离的前提下是错的——A 的 SOUL @B 需要的是 B 在 **A 的 App 命名空间**里的 id。
+
+- ➕ `collect-ids --via-api`：用每个 profile 自己的 App 凭证换 tenant_access_token 读**群消息历史**，从结构化 mentions 数组提取 open_id（完整不截断、无需任何新消息、命名空间天然正确）；缺 `im:message.group_msg` 权限时打印该 App 的**一键授权链接**；顺带用群信息接口补齐 `@主人`；支持 `--chat-id`（缺省取各 profile 日志最新 chat_id）
+- ➕ `[Mentioned:]` 日志行解析（API 不可用时的回退）：名字**逐字保留**（括号后缀是项目命名的一部分，不是租户标记）、首个条目的 `text='[Mentioned: ` 前缀、`@all` 条目、120 字符截断的残缺条目、无闭合 `]` 的截断行不吞下一行——全部处理（真实 whisage 团队 9 profile 日志验证：39/40 条目逐字匹配 SOUL 名字）
+- 🔄 **按 profile 独立映射**取代全局映射：每个 SOUL 只回填自己观测到的 id；来源优先级 api > mention > sender（自由模式 sender=bot 补充自己那一行）
+- 🔒 **幂等回填**：只替换 `ou_xxx` 占位符，手工回填/已收集的真实 id 永不改写，重跑安全。⚠️ **旧版升级注意**：0.8.x 的旧 collect-ids 把全局 name→id 映射写进每个 SOUL——其中留下的"真实 id"可能属于**别的 App 命名空间**，本版的幂等回填与 `verify` 都不会发现或改写它们（@ 目标错误且无提示，重渲染也会原样保留）。升级前若跑过旧版 collect-ids 并拿到过 id，请把受影响 @ 行改回 `ou_xxx_<key>` 占位符后重跑 `collect-ids --via-api`（或手工改正为本 App 命名空间的 id）；只用占位符/全新创建的 SOUL 不受影响
+- 📊 如实报告：每个 profile 填了几个、还剩几个占位符、来源分布（api/mention/sender/log）；结尾汇总
+- 🧰 新增 `utils/feishu_api.py`（可注入 transport、密钥不落日志）；README collect-ids 章节重写；新增真实日志格式夹具 / mock transport / 授权链接 / 幂等重跑 / 命名空间隔离等测试
+
+发布前自查修复（同一版本内收敛，不留已知缺陷）：
+
+- 🩹 `--via-api` 真实 CLI 路径崩溃修复：CLI 不注入 transport 时字面 `None` 一路传进 API 层覆盖默认实现，首次 HTTP 调用即 `TypeError`；各入口统一 `transport or _default_transport` 归一（collect_team_ids / _api_ids_for_profile / 各 API 函数），并补一条**不注入 transport、mock urllib** 的 CLI 级测试
+- 🩹 群信息接口（补 `@主人`，需 `im:chat:readonly`）失败不再连坐丢弃已取到的 mentions：owner 查询单独 try/except（best-effort，失败仅跳过主人行并如实打印 HTTP/code）；缺权限的 scope 兜底不再对 99991672 硬编码 `im:message.group_msg`——由**失败调用方**提供兜底（messages→group_msg、chats→无兜底原样报 code），不再打印误导性授权链接死循环
+- 🩹 API 客户端不再把错误当成功：`_check` 先看 HTTP 状态（≥400 即抛，无 code 的 4xx/5xx 页面此前被当作 code-less 成功、静默"0 id(s) filled"）；`_default_transport` 对**非 JSON 响应体**（门户/代理 HTML，含 200）抛 `FeishuApiError` 而不是裸 `JSONDecodeError` 崩溃，均按"API 不可用→用日志"降级
+- 🩹 `@主人` 日志回填不再瞎猜：仅当日志入站元数据行中只观测到**唯一一个**真人 sender id 时才回填（多个真人打印警告跳过——错误猜测会被幂等回填冻结且 verify 豁免主人行）；`chat_id`/`sender` 匹配限定在 `Inbound … received` 元数据行并在 `text='` 消息体处截断，正文里出现的 id 样 token 不再参与"最新"选择
+- 🩹 mention 条目名含逗号（team_config 允许）不再错位：按 `", "` 分隔 + 尾部 `(open_id=…)` 锚定做结构化解析，无 id 的片段作为逗号名前缀并回下一片（`A,B` 不再填进成员 `B` 的 @ 行）
+- 🩹 剩余占位符统计与 `verify` 同口径：`主人` 与渲染用总管（元数据 hub 名 / legacy `M总`）按设计豁免，不再出现"verify 全 OK 但 collect-ids 永远报 N placeholder(s) remain"的矛盾
+- 🩹 API 域名跟随 profile 的 `FEISHU_DOMAIN=lark`（open.larksuite.com；授权链接同步），Lark 租户 `--via-api` 不再必然失败
+- 📚 README_EN 的 collect-ids 步骤与命令表同步重写后的语义（--via-api / 幂等 / 按 profile 命名空间）；中文 README 数据来源补齐第 4 个 `log` 来源
+
+发布前自查修复·二：
+
+- 🩹 API 已解析的名字不再被日志启发式"唱衰"：`@主人` 已由群信息接口回填、或自身 @ 行已由 API mentions 回填时，不再打印 "cannot tell which is @主人 / own @-line left as-is" 这类与事实相反的警告（日志回退仅在对应名字尚未解析时运行）
+- 🩹 `--chat-id` 缺省推断优先取**群聊**行（`Inbound group message received`）的 chat_id——日志里更新的私聊行不再把默认请求指向 DM；无任何群聊行时才退回任意会话；该默认推断路径与群优先规则均有测试
+- 🩹 `--chat-id` 增加 CLI 校验（`oc_[0-9A-Za-z]+`，非法值用法错误退出而非 traceback）；API 层同时把 `http.client.HTTPException`/`ValueError`（如 InvalidURL，非 OSError 子类）并入 "API 不可用→用日志" 降级，直调 `collect_team_ids` 的调用方同样安全
+- 🩹 来源分布与 filled 同口径：`fill_soul_placeholder_open_ids` 额外返回实际写入 SOUL 的名字集合，`sources: api=N` 只统计真正落盘的 id（API 观测到但 SOUL 里不存在的名字不再虚增计数）
+- 🧪 via-api 命名空间隔离测试改为按 Authorization token 区分返回数据，真正验证"每个 profile 用自己的 token、只拿到自己 App 命名空间的 id"
+- 🧹 `.gitignore` 增加 `.zcode/` 与 `uv.lock`（构建后端为 setuptools、未声明 uv 配置；若日后采用 uv 应取消忽略并提交 uv.lock）
+
+发布前自查修复·三：
+
+- 🔒 自身 bot id 不再取自入站行：入站元数据行的 `sender=bot:` 是**队友 bot**（多 bot 群里队友 @ 本 bot 即记录），此前"日志里唯一 bot sender"会被当成自己的 id 填进自身 @ 行（错误 id 被幂等回填冻结、并经 harvest 传播到重渲染）。新增 `own_bot_sender_ids`：仅统计**非入站**（出站 `sender=bot:`）行的 id，出站来源行为不变
+- 🔒 `[Mentioned:]` 只解析消息正文引号（每行第一个 `text='`）**紧邻其后**的一段：用户在群里粘贴/引用的另一份日志里的 `[Mentioned: …]`（甚至整条带 `text='` 的适配器行）是消息内容而非本 App 的观测，不再把外命名空间 id 填进 SOUL（"只用本 App 观测 id"不变量）
+- 🩹 手工回填的 SOUL 不再被日志启发式"唱衰"：自身 @ 行 / `@主人` 已是真实 id（hand-filled 或上次运行结果）时，日志歧义警告（`left as-is` / `cannot tell which is`）不再与 `all filled ✅` 同屏矛盾——日志启发式仅在对应 `<at>` 仍是 `ou_xxx` 占位符时运行；无 SOUL 的 profile 提前跳过（不再空跑日志解析；无 @ 小节**标题**不是门槛——回填只认 `<at>` 标签，自定义标题如【飞书@格式】同样生效）
+
+发布前自查修复·四：
+
+- 🩹 `--via-api` 下群信息接口失败时的警告措辞调整（见自查修复·五：最终只陈述失败本身）；补齐两条无覆盖分支的测试：`"hub": {"name": …}` 字典元数据（内置团队 init 写入的真实形状）的豁免分支——回归会让默认团队重新"永远报 placeholders remain"；出站 bot id 多于一个时的歧义警告分支
+
+发布前自查修复·五（独立复核确认的 10 项）：
+
+- 🔒 **重渲染按 profile 保留各自 SOUL 的 open_id**：open_id 按 App 命名空间隔离，旧的 `harvest_team_open_ids` 把所有 profile 的 SOUL 合并成一个全局映射（last-profile-wins），add/remove-member/init 重渲染后回灌会把一个 App 的命名空间写进**所有** SOUL（实测 add-member 后 @P酱 被改成 QA 命名空间的 id）。改为渲染前只收获**该 SOUL 自己**的 id、渲染后原样回灌（`harvest_own_soul_open_ids`）；新成员的全新 SOUL 保持占位符（其 App 尚无任何观测，交由 collect-ids 回填）；补"两个 profile 使用不同命名空间 id"的 add-member/init 回归测试
+- 🔒 日志解析只认适配器 `Inbound … received` 行，正文起始引号按 Hermes 的 `text=%r` 同时接受单/双引号：正文含单引号时 repr 渲染为 `text="…"`（旧解析丢失该消息全部 mention，且正文里的 `sender=` token 会被当作元数据）；非入站行（如引用消息内容 `reply_to_text='[Mentioned: …]'`，其尾部恰好含 `text='` 子串）不再被当作本 App 观测
+- 🩹 `collect-ids` 写 SOUL 改为临时文件 + `os.replace` 原子替换：写失败（只读目录/磁盘满）不再裸 traceback 中断后续 profile，而是按 profile 报清晰错误并继续其余 profile；`write_text` 先截断后写、ENOSPC 时可能留下截断 SOUL 的问题一并消除
+- 🩹 `--chat-id` 不带 `--via-api` 时直接报用法错误：此前该值被静默忽略（用户以为走了 API 实际只解析了日志），而其非法值反而报用法错误，行为不一致
+- 🩹 `--via-api` owner 查询失败的警告只陈述失败本身、不再预言行不变：紧随其后的日志回填可能真的填上 @主人，旧措辞 "the @主人 line is left unchanged" 与下一行 `sources: log=1` 自相矛盾；补"owner 失败 + 日志单真人"组合测试
+- 🧪 补 `URLError`（网络不可用 → 用日志）降级分支的测试——真实环境最常见的 API 失败路径，此前零覆盖
+- 📚 README/README_EN 更正两处与实现不符的描述：render-only 总管（coordinator_fallback/内置 M总）的占位符**观测到时会自动回填**（未观测到时仍豁免缺口统计）；collect-ids 只要求 `<at>` 标签、不要求固定小节标题。CHANGELOG 本版本内逐次测试计数经实测与实际不符（`git archive HEAD` + `pytest --collect-only` 核得基线 275），已删去逐次计数；0.9.0 全量测试 275 → 361
+
+发布前自查修复·六（独立复核确认的 6 项）：
+
+- 🔒 **`--clone-from` 不再带回源 App 命名空间 id**：Hermes 的 `profile create --clone-from` 会复制源 profile 的 SOUL.md（其真实 id 属于源 App 命名空间），此前 init 会收获并回灌这份**刚克隆**的 SOUL——新 profile 配上自己的 App 后这些 id 全部失效，且 collect-ids 不改真实 id、verify 查不出。现改为仅当 profile 在本次运行**前**已存在（重跑）才收获/回灌（`existed` 门控），新建（含 clone）的渲染结果保持占位符
+- 🔒 **add-member 重新加入 kept profile 不再清空其 id**：rejoin 走"新成员 SOUL"分支直接用占位符渲染覆盖，丢失其自己命名空间里已收集（可能手填、不可自动恢复）的 id；现与重跑同构——写前收获该 profile 自己的 SOUL id（全新 profile 收获为空、行为不变）、写后回灌
+- 🔒 **重渲染回灌按 `<at>` 标签匹配、不再依赖【飞书@方式】小节标题**：自定义模板用别的小节标题（真实 whisage 团队用【飞书@格式】）时，旧的 `update_soul_md_open_ids` 小节内替换会静默丢弃全部收获 id（实测 add-member 后 9 个真实 id 变 10 个占位符）；统一改用 `fill_soul_placeholder_open_ids`（渲染产物全是占位符，占位符规则即精确回灌），该函数已删除。已知限制：模板不可恢复时的补丁路径（`_patch_at_section`）仍只认【飞书@方式】小节——返回 False 即安全跳过、SOUL 原样保留（id 不丢，仅名单行需手改），已在 docstring 注明
+- 🩹 `fill_soul_placeholder_open_ids` 原子替换保留原文件权限位（0600 不再变成 umask 默认 0664）；symlink 明确**拒绝**（替换会把链接变成普通文件、链接目标仍是旧占位符，报错指明处理方式）；只读文件在可写目录下仍被替换但保留其 mode；补 mode/symlink 回归测试
+- 📚 0.9.0 幂等回填条目补充旧版（全局映射）升级迁移指引，弱化"现网混排 SOUL 直接可用"表述
+
+发布前自查修复·七（独立复核确认的 5 项）：
+
+- 🔒 **add-member `--clone-from` 不再泄漏源 App 命名空间 id**：与自查修复·六的 init 侧同源——step 1 的 `profile create --clone-from` 先把源 profile 的 SOUL.md 复制进新目录，step 2 的无条件收获会把源命名空间 id 冻结进新成员 SOUL。收获改为 `if rejoining else {}`（只有 kept profile 的 SOUL 才属于本 App；新建成员含 clone 一律占位符，由其自己的 collect-ids 回填），补 add-member --clone-from 回归测试
+- 🩹 **init 首跑失败清理刚创建的 profile 目录**：`_create_profile` 渲染/写入失败只报 per-role 失败、不清理目录——残留的克隆 SOUL 会让重试命中 `existed` 门控、收获源 App id 回灌（实测失败首跑+重试仍泄漏）。现对本次运行**新建**的 profile 在失败时 rmtree（与 add-member 的 `_cleanup_orphan` 一致；重跑/既有 profile 永不清理），补失败首跑+重试回归测试
+- 🔒 **symlink SOUL 不再被穿透写入**：重渲染路径的 `write_text` 跟随 symlink，会把占位符写进链接目标、真实 id 被覆盖且（拒绝 symlink 的）fill 无法回灌。init/member 的全部四处渲染写入（`_create_profile`、身份变更重渲染、`_rebuild_souls`、add-member step 2）写前检测 `is_symlink()`：跳过并警告（目标数据原样保留，指明修法），补 symlink 重渲染回归测试
+- 🩹 重渲染的 SOUL 写入纳入 OSError 守卫（`_rebuild_souls` 与 init 身份变更重渲染两处）：目录不可写/磁盘满时降级为逐 profile 警告并继续团队循环，不再裸 traceback 中止，补对应回归测试
+
+发布前自查修复·八（独立复核确认的 5 项）：
+
+- 🔒 **全部 SOUL 写入原子化、id 回灌移入内存**：四处渲染写入（`_create_profile`、init 身份变更重渲染、`_rebuild_souls`、add-member step 2）原为 `write_text`（先截断后写）——mid-write ENOSPC 会把 SOUL 截断成 0 字节而守卫仍声称 "left as-is"。抽出共享的 `atomic_write_text`（tmp+`os.replace`、保留权限位、拒绝 symlink）与 `fill_placeholders_in_text`：own ids 先应用到**渲染内容**再一次性原子落盘，同时消除"写完才回灌"的两步窗口（回灌失败不再留下占位符 SOUL、原 id 不再丢失）；`_patch_at_section` 同改原子写并拒绝 symlink。`_create_profile` 的失败消息分流：写失败不再误报 "Failed to render template"
+- 🩹 **补丁路径纳入守卫**：`_rebuild_souls` 两处 `_patch_at_section` 调用（模板渲染失败回退 / 模板不可恢复）此前无 OSError 守卫——SOUL 只读/目录不可写时 PermissionError 裸露、中止团队循环（新 profile 已建）。现统一走 `_try_patch`：OSError 警告（点名成员）并继续
+- 🩹 **补丁静默跳过改为可见警告**：`_patch_at_section` 返回 False（自定义标题如【飞书@格式】、无该小节、或 symlink SOUL）时此前毫无提示，add-member 仍报 "N teammate SOUL(s) updated" 而该成员名单实际未变；现按原因警告（点名成员 + 指明手补名单行/恢复模板），"patching 【飞书@方式】 only" 措辞改为先尝试后如实报告结果
+- 🩹 **add-member step 2 的成功消息条件化**：symlink SOUL 跳过写入后不再同时打印矛盾的 "✅ SOUL.md + metadata written"，改为 "metadata written; SOUL.md (symlink) left as-is"；补 rejoin+symlink 回归测试（rejoin 仍完成、removed 标记清除、目标名单与 id 原样）
+
+### 🔐 configure 凭证输入的终端体验加固
+
+- App Secret 在真实终端（TTY）逐字符回显 `*`，支持退格修正（DEL 与 `^H`）；方向键/Home/End 等 CSI/SS3 转义序列整体吞掉（此前按一次方向键会把 `[A` 之类的尾巴静默拼进密钥，直到 connect 才暴露）；序列消费遇 Enter/ESC 即止且上限 16 字节，残留半截序列不会再连回车一起吞掉。管道/CI（非 TTY）保持 click 隐藏 prompt，行为不变
+- 凭证输入（App ID / App Secret）strip 首尾空白（含全角空格 U+3000）：复制粘贴带进来的空白不再绕过 App ID 查重
+- 终端模式切换改用 `TCSADRAIN`：提示符显示到 cbreak 生效之间敲下的字符不再被 `TCSAFLUSH` 静默丢弃
+
 ## [0.8.0] - 2026-10-21
 
 ### 🤖 独立单功能 agent 成为一等公民（new-bot）
