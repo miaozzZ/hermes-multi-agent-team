@@ -57,29 +57,7 @@ def cli() -> None:
 
 
 # Lazy imports so the CLI starts fast
-@cli.command()
-@click.option("--team-name", default=None, help="Name for the agent team.")
-@click.option(
-    "--roles",
-    default=None,
-    help="Comma-separated role keys, a subset of the team's roles (default: all of them).",
-)
-@click.option(
-    "--prefix",
-    default=None,
-    callback=_prefix_param,
-    help="Profile name prefix (default: team name).",
-)
-@click.option("--clone-from", default=None, help="Clone model config from this profile.")
-@click.option(
-    "--config",
-    "config",
-    default=None,
-    type=click.Path(exists=True, dir_okay=False),
-    help="Team config JSON defining custom roles/names/templates (see examples/).",
-)
-@click.option("--dry-run", is_flag=True, help="Show what would be created without doing it.")
-def init(
+def _new_team_impl(
     team_name: str | None,
     roles: str | None,
     prefix: str | None,
@@ -87,7 +65,7 @@ def init(
     config: str | None,
     dry_run: bool,
 ) -> None:
-    """🏗️  Create Hermes profiles and generate SOUL.md for each team role."""
+    """🏗️  Create a team: Hermes profiles + SOUL.md for each role (pair with new-bot)."""
     from hermes_multi_agent_team.commands.init import init_team
 
     init_team(
@@ -98,6 +76,42 @@ def init(
         dry_run=dry_run,
         config=config,
     )
+
+
+_new_team_options = [
+    click.option("--team-name", default=None, help="Name for the agent team."),
+    click.option(
+        "--roles",
+        default=None,
+        help="Comma-separated role keys, a subset of the team's roles (default: all of them).",
+    ),
+    click.option(
+        "--prefix",
+        default=None,
+        callback=_prefix_param,
+        help="Profile name prefix (default: team name).",
+    ),
+    click.option("--clone-from", default=None, help="Clone model config from this profile."),
+    click.option(
+        "--config",
+        "config",
+        default=None,
+        type=click.Path(exists=True, dir_okay=False),
+        help="Team config JSON defining custom roles/names/templates (see examples/).",
+    ),
+    click.option("--dry-run", is_flag=True, help="Show what would be created without doing it."),
+]
+
+
+def _with_new_team_options(fn):
+    for opt in reversed(_new_team_options):
+        fn = opt(fn)
+    return fn
+
+
+cli.add_command(click.command(name="new-team")(_with_new_team_options(_new_team_impl)))
+# Hidden alias: `init` keeps working for muscle memory and old scripts.
+cli.add_command(click.command(name="init", hidden=True)(_with_new_team_options(_new_team_impl)))
 
 
 @cli.command()
@@ -223,7 +237,7 @@ def remove_member(prefix: str, key: str, keep_profile: bool, force: bool, dry_ru
 @cli.command("new-config")
 @click.argument("output_path", required=False)
 def new_config(output_path: str | None) -> None:
-    """🪄 Interactively build a team config JSON (then run init --config with it)."""
+    """🪄 Interactively build a team config JSON (then run new-team --config with it)."""
     from hermes_multi_agent_team.commands.wizard import run_wizard
 
     run_wizard(output_path)
@@ -273,6 +287,14 @@ def verify(prefix: str) -> None:
     from hermes_multi_agent_team.commands.verify import verify_team
 
     verify_team(prefix=prefix)
+
+
+@cli.command("list")
+def list_all() -> None:
+    """📋 List every team (by prefix) and standalone bot on this host."""
+    from hermes_multi_agent_team.commands.listing import run_list
+
+    run_list()
 
 
 @cli.command()

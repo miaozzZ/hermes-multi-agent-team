@@ -311,12 +311,12 @@ def test_wizard_prompted_directory_path_rejected(tmp_path: Path):
 
 
 def test_wizard_prints_quoted_config_path(tmp_path: Path):
-    """An output path containing spaces is shell-quoted in the init line."""
+    """An output path containing spaces is shell-quoted in the new-team line."""
     out = tmp_path / "my config.json"
     inputs = "T\n\n3\nn\n\nwriter\n阿写\n内容创作\n\npm\nn\n"
     result = CliRunner().invoke(cli, ["new-config", str(out)], input=inputs)
     assert result.exit_code == 0, result.output
-    assert f"hermes-team init --config '{out}'" in result.output
+    assert f"hermes-team new-team --config '{out}'" in result.output
     assert out.is_file()
 
 

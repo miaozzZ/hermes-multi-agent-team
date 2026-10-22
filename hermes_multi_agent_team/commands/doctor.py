@@ -93,7 +93,7 @@ def _check_jinja2() -> tuple[bool, str, str]:
 
 
 def _check_hermes_profiles_dir() -> tuple[bool, str, str]:
-    """Check if ~/.hermes/profiles directory exists."""
+    """Check if the Hermes profiles directory exists."""
     from hermes_multi_agent_team.utils.profile import get_profiles_dir
 
     profiles_dir = get_profiles_dir()
@@ -102,14 +102,28 @@ def _check_hermes_profiles_dir() -> tuple[bool, str, str]:
     return False, "not found", f"mkdir -p {profiles_dir}"
 
 
+def _profiles_dir_desc() -> str:
+    """说明 column for the Profiles dir check (rendered at run time).
+
+    Must not hardcode ~/.hermes: with a custom HERMES_HOME the Detail column
+    and fix command next to it show the real path — the caption should match.
+    """
+    from hermes_multi_agent_team.utils.profile import get_profiles_dir
+
+    return f"{get_profiles_dir()} 目录（装好 Hermes 即有）"
+
+
+# (label, 说明, checker) — the 说明 column is what a first-time user actually
+# needs: what this check is and why it matters. A 说明 may be a callable so
+# paths render at RUN time (HERMES_HOME may differ from the import-time value).
 ALL_CHECKS = [
-    ("Python ≥3.10", _check_python_version),
-    ("Hermes CLI", _check_hermes_installed),
-    ("Hermes version", _check_hermes_version),
-    ("click", _check_click),
-    ("python-dotenv", _check_dotenv),
-    ("Jinja2", _check_jinja2),
-    ("Profiles dir", _check_hermes_profiles_dir),
+    ("Python ≥3.10", "Python 运行时版本", _check_python_version),
+    ("Hermes CLI", "Hermes 可执行文件是否可用", _check_hermes_installed),
+    ("Hermes version", "需 ≥0.19（多 profile 复用网关架构）", _check_hermes_version),
+    ("click", "CLI 框架（本工具依赖）", _check_click),
+    ("python-dotenv", ".env 读写库（本工具依赖）", _check_dotenv),
+    ("Jinja2", "SOUL 模板引擎（本工具依赖）", _check_jinja2),
+    ("Profiles dir", _profiles_dir_desc, _check_hermes_profiles_dir),
 ]
 
 
@@ -123,7 +137,7 @@ def run_doctor() -> None:
     all_ok = True
     results: list[tuple[str, bool, str, str]] = []
 
-    for label, check_fn in ALL_CHECKS:
+    for label, _desc, check_fn in ALL_CHECKS:
         ok, detail, fix = check_fn()
         if not ok:
             all_ok = False
@@ -131,13 +145,14 @@ def run_doctor() -> None:
 
     # Table
     click.echo(f"   {'Check':<20} {'Status':<8} {'Detail':<30}")
-    click.echo("   " + "─" * 58)
+    click.echo("   " + "─" * 78)
 
-    for label, ok, detail, _fix in results:
+    for (label, desc, _fn), (_lbl, ok, detail, _fix) in zip(ALL_CHECKS, results):
         icon = "✅" if ok else "❌"
-        click.echo(f"   {label:<20} {icon:<8} {detail:<30}")
+        desc_text = desc() if callable(desc) else desc
+        click.echo(f"   {label:<20} {icon:<8} {detail:<30}  # {desc_text}")
 
-    click.echo("   " + "─" * 58)
+    click.echo("   " + "─" * 78)
     click.echo()
 
     # Summary
@@ -156,6 +171,6 @@ def run_doctor() -> None:
         sys.exit(1)
 
     click.echo("💡 Quick commands:")
-    click.echo("   hermes-team init --team-name my-team   # Create a team")
+    click.echo("   hermes-team new-team --team-name my-team   # Create a team")
     click.echo("   hermes-team status --prefix my-team    # Check team status")
     click.echo()

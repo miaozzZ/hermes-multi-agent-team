@@ -39,6 +39,20 @@ RECOMMENDED_ENV_KEYS = [
     "FEISHU_REQUIRE_MENTION",
 ]
 
+# Bilingual check labels: keep the machine key (tests and muscle memory) and
+# add the Chinese meaning — verify output should explain itself.
+CHECK_LABELS: dict[str, str] = {
+    "profile_dir": "profile_dir（目录存在）",
+    "env_file": "env_file（飞书凭证）",
+    "env_recommended": "env_recommended（推荐配置项）",
+    "group_policy": "group_policy（群策略 sanity）",
+    "soul_md": "soul_md（人设文件）",
+    "team_metadata": "team_metadata（团队元数据）",
+    "open_ids": "open_ids（@名单 id 回填）",
+    "gateway_running": "gateway_running（网关进程）",
+    "gateway_connected": "gateway_connected（飞书连接）",
+}
+
 
 def _check_profile(profile_name: str) -> dict[str, tuple[bool, str]]:
     """Run all checks for a single profile. Returns check_name → (pass, detail)."""
@@ -130,11 +144,15 @@ def _check_profile(profile_name: str) -> dict[str, tuple[bool, str]]:
                 # narrower class would leave ou_xxx_front-end invisible and
                 # pass a team that cannot @ that member.
                 at_pattern = re.compile(r'<at user_id="([^"]+)">([^<]+)</at>')
-                # Two roster lines are placeholders BY DESIGN and never
-                # auto-filled by collect-ids (it only maps bot ids): the owner
-                # line (name 主人 — reserved, no member may take it) and the
-                # render-only hub (identified by NAME from this profile's
-                # recorded hub, or the legacy M总 for pre-metadata teams).
+                # Two roster lines are exempt because they may LEGITIMATELY
+                # stay placeholders: the owner line (name 主人 — reserved, no
+                # member may take it) is auto-filled by collect-ids only when
+                # it can tell who the owner is (group-owner API, or the single
+                # human sender in the log) — otherwise it stays a placeholder;
+                # and the render-only hub (identified by NAME from this
+                # profile's recorded hub, or the legacy M总 for pre-metadata
+                # teams) has no profile of its own and fills only once its
+                # name is observed (group history / log mentions).
                 # Exempting by placeholder ID (ou_xxx_coordinator/owner)
                 # would wrongly excuse a real member whose KEY happens to be
                 # "coordinator"/"owner" — its placeholder is never filled
@@ -147,9 +165,9 @@ def _check_profile(profile_name: str) -> dict[str, tuple[bool, str]]:
                 elif "hub" not in meta:
                     # No hub record at all (legacy teams, or metadata from
                     # before the hub field existed): the builtin M总 was
-                    # rendered into every SOUL and is never auto-filled. A
-                    # PRESENT "hub" key (null or a dict) is a deliberate
-                    # declaration — no M总 exemption for those teams.
+                    # rendered into every SOUL; unobserved, it stays a
+                    # placeholder. A PRESENT "hub" key (null or a dict) is a
+                    # deliberate declaration — no M总 exemption for those teams.
                     exempt_names.add("M总")
                 placeholders: list[str] = []
                 real_ids: set[str] = set()
@@ -245,7 +263,7 @@ def verify_team(prefix: str) -> None:
 
     if not profiles:
         raise click.ClickException(
-            f"❌ No profiles found with prefix '{prefix}'. Run 'hermes-team init' first."
+            f"❌ No profiles found with prefix '{prefix}'. Run 'hermes-team new-team' first."
         )
 
     click.echo(f"\n✅ Verifying {len(profiles)} profile(s) with prefix '{prefix}'\n")
@@ -267,7 +285,8 @@ def verify_team(prefix: str) -> None:
 
         for check_name, (ok, detail) in results.items():
             icon = "✅" if ok else "❌"
-            click.echo(f"   {icon} {check_name}: {detail}")
+            label = CHECK_LABELS.get(check_name, check_name)
+            click.echo(f"   {icon} {label}: {detail}")
         click.echo()
 
     # Team-level check: one Feishu app per agent (the gateway parks duplicates).

@@ -12,7 +12,7 @@ def test_init_dry_run():
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["init", "--team-name", "TestTeam", "--roles", "pm", "--dry-run"],
+        ["new-team", "--team-name", "TestTeam", "--roles", "pm", "--dry-run"],
     )
     assert result.exit_code == 0
     assert "DRY RUN" in result.output
@@ -24,7 +24,7 @@ def test_init_rejects_invalid_roles():
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["init", "--team-name", "TestTeam", "--roles", "pm,invalid_role"],
+        ["new-team", "--team-name", "TestTeam", "--roles", "pm,invalid_role"],
     )
     assert result.exit_code != 0
     assert "Unknown roles" in result.output
@@ -35,7 +35,7 @@ def test_init_creates_profiles(tmp_hermes_home: Path, mock_subprocess_success):
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["init", "--team-name", "TestTeam", "--roles", "pm,fe", "--prefix", "test"],
+        ["new-team", "--team-name", "TestTeam", "--roles", "pm,fe", "--prefix", "test"],
     )
     assert result.exit_code == 0
 
@@ -62,7 +62,7 @@ def test_init_skips_existing_profiles(tmp_hermes_home: Path, mock_subprocess_suc
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["init", "--team-name", "TestTeam", "--roles", "pm", "--prefix", "test"],
+        ["new-team", "--team-name", "TestTeam", "--roles", "pm", "--prefix", "test"],
     )
     assert result.exit_code == 0
     assert "already exists" in result.output
@@ -73,7 +73,7 @@ def test_init_generates_soul_md(tmp_hermes_home: Path, mock_subprocess_success):
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["init", "--team-name", "MyTeam", "--roles", "qa", "--prefix", "mt"],
+        ["new-team", "--team-name", "MyTeam", "--roles", "qa", "--prefix", "mt"],
     )
     assert result.exit_code == 0
 
@@ -88,7 +88,7 @@ def test_init_all_roles(tmp_hermes_home: Path, mock_subprocess_success):
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["init", "--team-name", "FullTeam", "--roles", "pm,fe,be,qa,ui", "--prefix", "full"],
+        ["new-team", "--team-name", "FullTeam", "--roles", "pm,fe,be,qa,ui", "--prefix", "full"],
     )
     assert result.exit_code == 0
     assert "FullTeam" in result.output
@@ -116,7 +116,7 @@ def test_init_team_config_bot_template(
     )
 
     runner = CliRunner()
-    result = runner.invoke(cli, ["init", "--config", str(cfg)])
+    result = runner.invoke(cli, ["new-team", "--config", str(cfg)])
     assert result.exit_code == 0, result.output
 
     soul = (tmp_hermes_home / "profiles" / "bt-writer" / "SOUL.md").read_text(encoding="utf-8")
@@ -133,7 +133,7 @@ def test_reinit_preserves_collected_open_ids(tmp_hermes_home: Path, mock_subproc
     rewrite and re-applied after, instead of silently resetting to ou_xxx_*
     and breaking live @-mentions (the same guarantee add/remove-member give)."""
     runner = CliRunner()
-    first = runner.invoke(cli, ["init", "--team-name", "T", "--prefix", "t", "--roles", "pm"])
+    first = runner.invoke(cli, ["new-team", "--team-name", "T", "--prefix", "t", "--roles", "pm"])
     assert first.exit_code == 0, first.output
 
     soul_path = tmp_hermes_home / "profiles" / "t-pm" / "SOUL.md"
@@ -148,7 +148,7 @@ def test_reinit_preserves_collected_open_ids(tmp_hermes_home: Path, mock_subproc
         filled = filled.replace(placeholder, real)
     soul_path.write_text(filled, encoding="utf-8")
 
-    rerun = runner.invoke(cli, ["init", "--team-name", "T", "--prefix", "t", "--roles", "pm"])
+    rerun = runner.invoke(cli, ["new-team", "--team-name", "T", "--prefix", "t", "--roles", "pm"])
     assert rerun.exit_code == 0, rerun.output
 
     after = soul_path.read_text(encoding="utf-8")
@@ -165,7 +165,9 @@ def test_reinit_preserves_per_profile_namespaces(tmp_hermes_home: Path, mock_sub
     merged all SOULs into one name→id map (last profile wins) and wrote one
     app's namespace into every SOUL, breaking live @-mentions."""
     runner = CliRunner()
-    first = runner.invoke(cli, ["init", "--team-name", "T", "--prefix", "t", "--roles", "pm,qa"])
+    first = runner.invoke(
+        cli, ["new-team", "--team-name", "T", "--prefix", "t", "--roles", "pm,qa"]
+    )
     assert first.exit_code == 0, first.output
 
     # Simulate collect-ids having run for BOTH apps.
@@ -179,7 +181,9 @@ def test_reinit_preserves_per_profile_namespaces(tmp_hermes_home: Path, mock_sub
             filled = filled.replace(placeholder, real)
         soul_path.write_text(filled, encoding="utf-8")
 
-    rerun = runner.invoke(cli, ["init", "--team-name", "T", "--prefix", "t", "--roles", "pm,qa"])
+    rerun = runner.invoke(
+        cli, ["new-team", "--team-name", "T", "--prefix", "t", "--roles", "pm,qa"]
+    )
     assert rerun.exit_code == 0, rerun.output
 
     pm_soul = (tmp_hermes_home / "profiles" / "t-pm" / "SOUL.md").read_text(encoding="utf-8")
@@ -227,7 +231,7 @@ def test_init_clone_from_keeps_placeholders_not_source_ids(
 
     result = CliRunner().invoke(
         cli,
-        ["init", "--team-name", "T", "--prefix", "t", "--roles", "pm", "--clone-from", "src"],
+        ["new-team", "--team-name", "T", "--prefix", "t", "--roles", "pm", "--clone-from", "src"],
     )
     assert result.exit_code == 0, result.output
 
@@ -286,7 +290,7 @@ def test_init_failed_clone_run_cleans_up_and_retry_stays_clean(
         encoding="utf-8",
     )
 
-    fail = CliRunner().invoke(cli, ["init", "--config", str(cfg), "--clone-from", "src"])
+    fail = CliRunner().invoke(cli, ["new-team", "--config", str(cfg), "--clone-from", "src"])
     # Per-role failure with the documented non-zero exit (verify/doctor
     # convention) — a clean report, not a traceback.
     assert fail.exit_code == 1
@@ -296,7 +300,7 @@ def test_init_failed_clone_run_cleans_up_and_retry_stays_clean(
     assert not (tmp_hermes_home / "profiles" / "t-pm").exists()
 
     broken.write_text("你是{{ name }}\n", encoding="utf-8")
-    retry = CliRunner().invoke(cli, ["init", "--config", str(cfg), "--clone-from", "src"])
+    retry = CliRunner().invoke(cli, ["new-team", "--config", str(cfg), "--clone-from", "src"])
     assert retry.exit_code == 0, retry.output
     soul = (tmp_hermes_home / "profiles" / "t-pm" / "SOUL.md").read_text(encoding="utf-8")
     assert "你是P酱" in soul  # the fixed template's render
@@ -335,14 +339,14 @@ def test_reinit_refills_custom_heading_section(
     )
 
     runner = CliRunner()
-    first = runner.invoke(cli, ["init", "--config", str(cfg)])
+    first = runner.invoke(cli, ["new-team", "--config", str(cfg)])
     assert first.exit_code == 0, first.output
     # Simulate collect-ids having filled this profile's own id.
     soul_path = tmp_hermes_home / "profiles" / "t-pm" / "SOUL.md"
     filled = soul_path.read_text(encoding="utf-8").replace("ou_xxx_pm", "ou_pmOWNcust")
     soul_path.write_text(filled, encoding="utf-8")
 
-    rerun = runner.invoke(cli, ["init", "--config", str(cfg)])
+    rerun = runner.invoke(cli, ["new-team", "--config", str(cfg)])
     assert rerun.exit_code == 0, rerun.output
 
     after = soul_path.read_text(encoding="utf-8")
@@ -385,7 +389,7 @@ def test_init_never_hijacks_other_teams_profile(
         encoding="utf-8",
     )
 
-    result = CliRunner().invoke(cli, ["init", "--config", str(cfg)])
+    result = CliRunner().invoke(cli, ["new-team", "--config", str(cfg)])
     assert result.exit_code == 0, result.output
     assert "belongs to team prefix 'team-extra'" in result.output
 
@@ -435,7 +439,7 @@ def test_init_fails_closed_on_multiple_on_disk_coordinators(
         encoding="utf-8",
     )
 
-    result = CliRunner().invoke(cli, ["init", "--config", str(cfg)])
+    result = CliRunner().invoke(cli, ["new-team", "--config", str(cfg)])
     assert result.exit_code != 0
     assert "Multiple coordinator profiles on disk" in result.output
     for profile in ("t-boss", "t-boss2", "t-boss3"):
@@ -480,7 +484,7 @@ def test_init_declared_coordinator_conflicts_with_leftover_coordinators(
         encoding="utf-8",
     )
 
-    result = CliRunner().invoke(cli, ["init", "--config", str(cfg)])
+    result = CliRunner().invoke(cli, ["new-team", "--config", str(cfg)])
     assert result.exit_code != 0
     assert "config declares coordinator 老板3" in result.output
     assert "t-boss1 (老板1)" in result.output and "t-boss2 (老板2)" in result.output
@@ -533,7 +537,7 @@ def test_init_reserves_on_disk_coordinator_name(
         encoding="utf-8",
     )
 
-    result = CliRunner().invoke(cli, ["init", "--config", str(cfg)])
+    result = CliRunner().invoke(cli, ["new-team", "--config", str(cfg)])
     assert result.exit_code != 0
     assert "duplicates the on-disk coordinator's name" in result.output
 
@@ -565,7 +569,7 @@ def test_init_blocks_ambiguous_legacy_name_collision(
         encoding="utf-8",
     )
 
-    result = CliRunner().invoke(cli, ["init", "--config", str(cfg)])
+    result = CliRunner().invoke(cli, ["new-team", "--config", str(cfg)])
     assert result.exit_code == 0, result.output
     assert "dash beyond this prefix's boundary" in result.output
 
@@ -599,7 +603,7 @@ def test_init_rerender_unselected_members_on_hub_rename(
         ),
         encoding="utf-8",
     )
-    r1 = CliRunner().invoke(cli, ["init", "--config", str(old_cfg)])
+    r1 = CliRunner().invoke(cli, ["new-team", "--config", str(old_cfg)])
     assert r1.exit_code == 0, r1.output
 
     # collect-ids ran: dev's SOUL carries real ids for its teammates.
@@ -625,7 +629,7 @@ def test_init_rerender_unselected_members_on_hub_rename(
         ),
         encoding="utf-8",
     )
-    r2 = CliRunner().invoke(cli, ["init", "--config", str(new_cfg), "--roles", "pm"])
+    r2 = CliRunner().invoke(cli, ["new-team", "--config", str(new_cfg), "--roles", "pm"])
     assert r2.exit_code == 0, r2.output
     assert "hr-dev: SOUL re-rendered to the current roster" in r2.output
 
@@ -660,7 +664,7 @@ def test_init_warns_when_changed_member_template_unrecoverable(
         ),
         encoding="utf-8",
     )
-    assert CliRunner().invoke(cli, ["init", "--config", str(old_cfg)]).exit_code == 0
+    assert CliRunner().invoke(cli, ["new-team", "--config", str(old_cfg)]).exit_code == 0
 
     # dev's template reference now dangles.
     dev_meta_path = tmp_hermes_home / "profiles" / "hr-dev" / ".hermes-team.json"
@@ -684,7 +688,7 @@ def test_init_warns_when_changed_member_template_unrecoverable(
         ),
         encoding="utf-8",
     )
-    r = CliRunner().invoke(cli, ["init", "--config", str(new_cfg), "--roles", "pm"])
+    r = CliRunner().invoke(cli, ["new-team", "--config", str(new_cfg), "--roles", "pm"])
     assert r.exit_code == 0, r.output
     assert "template is not recoverable" in r.output
     assert "OLD roster lines" in r.output
@@ -692,3 +696,20 @@ def test_init_warns_when_changed_member_template_unrecoverable(
     assert "老总" in (tmp_hermes_home / "profiles" / "hr-dev" / "SOUL.md").read_text(
         encoding="utf-8"
     )
+
+
+def test_init_alias_still_works(tmp_hermes_home, tmp_path, monkeypatch):
+    """`init` remains a hidden alias of `new-team` (muscle memory / old scripts)."""
+    binary = tmp_path / "bin" / "hermes"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n")
+    monkeypatch.setattr("shutil.which", lambda n: str(binary) if n == "hermes" else None)
+    from subprocess import CompletedProcess
+
+    monkeypatch.setattr(
+        "subprocess.run", lambda cmd, **kw: CompletedProcess(cmd, 0, stdout="", stderr="")
+    )
+
+    result = CliRunner().invoke(cli, ["init", "--team-name", "T", "--roles", "pm", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "DRY RUN" in result.output

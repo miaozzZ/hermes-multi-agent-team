@@ -585,3 +585,76 @@ def test_read_masked_line_on_pty_manages_terminal_state(tmp_path):
     assert out.count("s3cret") == 1
     assert "RESTORED:True" in out
     assert out.count("*") == 6
+
+
+def test_configure_field_help_lines_present(tmp_hermes_home: Path):
+    """Every settings prompt is preceded by its one-line explanation — the
+    tool's "never look anything up" contract."""
+    _make_profile(tmp_hermes_home, "team-pm", "")
+    result = CliRunner().invoke(
+        cli,
+        ["configure", "--prefix", "team"],
+        input="\n" * 6 + "cli_aaa\nsec\n\n",
+    )
+    assert result.exit_code == 0, result.output
+
+    # (help snippet(s), prompt label) — each snippet must appear BEFORE its
+    # prompt, and the prompts must appear in the flow order below: the
+    # shared-settings confirmation, the shared settings themselves, then
+    # per-profile App ID / App Secret / Allowed Users.
+    cases = [
+        (("平台设置指域名/连接方式/群策略",), "Use the same platform settings"),
+        (("服务域名：feishu=国内飞书",), "Feishu Domain (FEISHU_DOMAIN)"),
+        (("websocket=长连接",), "Connection Mode (FEISHU_CONNECTION_MODE)"),
+        (("群消息准入：open=所有群都响应",), "Group Policy (FEISHU_GROUP_POLICY)"),
+        (("团队成员互相是 bot",), "Allow Bots (FEISHU_ALLOW_BOTS)"),
+        (("群里是否只响应 @本bot",), "Require @mention (FEISHU_REQUIRE_MENTION)"),
+        (("飞书应用 ID（形如 cli_xxx）",), "Feishu App ID for team-pm"),
+        (("飞书应用密钥（与 App ID 同一页面）",), "Feishu App Secret for team-pm"),
+        (
+            ("用户白名单（填 open_id", "私聊/配对准入", "SOUL.md"),
+            "Allowed Users (FEISHU_ALLOWED_USERS)",
+        ),
+    ]
+    cursor = -1
+    for hints, prompt in cases:
+        assert prompt in result.output, prompt
+        prompt_at = result.output.index(prompt)
+        assert prompt_at > cursor, f"{prompt} out of flow order"
+        for hint in hints:
+            assert hint in result.output, hint
+            assert result.output.index(hint) < prompt_at, (
+                f"help for {prompt} must precede the prompt: {hint}"
+            )
+        cursor = prompt_at
+
+
+def test_configure_mixed_run_reask_gets_help_line(tmp_hermes_home: Path):
+    """The mixed run (team member + standalone bot sharing a prefix) re-asks
+    FEISHU_REQUIRE_MENTION per bot with the bot's own default — that confirm
+    must carry the same one-line explanation every other prompt gets.
+    test_configure_field_help_lines_present only covers the pure-team flow,
+    where the re-ask never runs.
+    """
+    _make_profile(tmp_hermes_home, "mix-pm", "")
+    _make_profile(tmp_hermes_home, "mix-helper", "")
+    # Standalone bot sharing the team's prefix (the README "mixed prefix" flow).
+    (tmp_hermes_home / "profiles" / "mix-helper" / ".hermes-team.json").write_text(
+        '{"standalone": true, "key": "helper", "name": "helper", "role": "签到"}\n',
+        encoding="utf-8",
+    )
+
+    # Shared-settings confirm + five shared prompts (team defaults), then per
+    # profile in name order: helper (App ID, App Secret, the re-asked Require
+    # @mention confirm, Allowed Users), then pm (App ID, App Secret, Allowed
+    # Users — no re-ask for a plain team member).
+    inputs = "\n" * 6 + "cli_helper\nsec\n\n\n" + "cli_pm\nsec\n\n"
+    result = CliRunner().invoke(cli, ["configure", "--prefix", "mix"], input=inputs)
+    assert result.exit_code == 0, result.output
+
+    confirm = "Require @mention for standalone bot mix-helper"
+    assert confirm in result.output
+    before = result.output[: result.output.index(confirm)]
+    # The help line shows once for the shared-settings pass and once more
+    # right before this re-ask; without the re-ask's own line only one shows.
+    assert before.count("群里是否只响应 @本bot") >= 2, result.output

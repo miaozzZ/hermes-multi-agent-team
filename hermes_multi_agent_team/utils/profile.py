@@ -308,7 +308,7 @@ def profile_served_by_host(name: str) -> bool:
     return not _config_gateway_standalone(profile_dir)
 
 
-# Written by `hermes-team init` into every team profile it creates and by
+# Written by `hermes-team new-team` into every team profile it creates and by
 # `new-bot` into every standalone bot: which role the profile plays
 # (key/name/nickname/role, coordinator flag; new-bot adds "standalone": true).
 # collect-ids reads it to map profiles back to SOUL.md names without relying

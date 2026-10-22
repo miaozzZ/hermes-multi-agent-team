@@ -204,7 +204,7 @@ def _load_roster(prefix: str, profiles: list[str]) -> tuple[str, list[Member], M
         click.echo(
             f"  ⚠️  {name}: name matches '{prefix}-…' but carries no recorded prefix — "
             f"it may belong to team '{name.rsplit('-', 1)[0]}'; excluded from the roster. "
-            "Re-init it under its own team to record the prefix and remove the ambiguity."
+            "Re-run new-team under its own team to record the prefix and remove the ambiguity."
         )
     members: list[Member] = []
     hub: Member | None = None
@@ -299,7 +299,7 @@ def _load_roster(prefix: str, profiles: list[str]) -> tuple[str, list[Member], M
         raise click.ClickException(
             f"❌ Multiple coordinator profiles on disk: {listed} — a roster renders "
             "exactly one 总管. Remove the extras (remove-member --keep-profile or "
-            "rm -rf) or re-init with a single coordinator config, then retry."
+            "rm -rf) or re-run new-team with a single coordinator config, then retry."
         )
     # 2. Unique keys and unique names (init raises the same error): duplicate
     #    keys mean two profiles fight over one <prefix>-<key>; duplicate
@@ -602,7 +602,7 @@ def add_member(
     profiles = list_team_profiles(prefix)
     if not profiles:
         raise click.ClickException(
-            f"❌ No profiles found with prefix '{prefix}'. Run 'hermes-team init' first."
+            f"❌ No profiles found with prefix '{prefix}'. Run 'hermes-team new-team' first."
         )
 
     team_name, members, hub = _load_roster(prefix, profiles)
@@ -833,7 +833,7 @@ def remove_member(
     profiles = list_team_profiles(prefix)
     if not profiles:
         raise click.ClickException(
-            f"❌ No profiles found with prefix '{prefix}'. Run 'hermes-team init' first."
+            f"❌ No profiles found with prefix '{prefix}'. Run 'hermes-team new-team' first."
         )
 
     team_name, members, hub = _load_roster(prefix, profiles)

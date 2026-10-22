@@ -18,7 +18,7 @@ A team config file makes roles customizable without touching code:
   profile name ``<prefix>-<key>``), ``name`` (shown in SOUL.md and matched
   against ``<at>`` tags by collect-ids) and ``role`` (job title). ``nickname``
   defaults to ``name``; ``template`` names a SOUL template (see below).
-- ``coordinator``: optional. When present, ``init`` also creates the
+- ``coordinator``: optional. When present, ``new-team`` also creates the
   coordinator's profile and renders the coordinator SOUL for it.
 - ``coordinator_fallback``: optional; mutually exclusive with ``coordinator``
   (declaring both is a load-time error). A render-only roster entry (``name``

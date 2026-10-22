@@ -492,7 +492,7 @@ def init_team(
         click.echo(
             f"   ⚠️  {ambiguous}: name matches '{prefix}-…' but carries no recorded "
             f"prefix — it may belong to team '{ambiguous.rsplit('-', 1)[0]}'; excluded "
-            "from the roster. Re-init it under its own team to record the prefix."
+            "from the roster. Re-run new-team under its own team to record the prefix."
         )
     for profile_name in list_team_profiles(prefix):
         if team_metadata_corrupt(profile_name):
@@ -589,13 +589,13 @@ def init_team(
                 f"❌ The config declares coordinator {coordinator.name}, but coordinator "
                 f"profile(s) already exist on disk: {listed} — remove them first "
                 "(remove-member --keep-profile, or rm -rf the profile directories) so "
-                "exactly one 总管 profile remains, then re-run init."
+                "exactly one 总管 profile remains, then re-run new-team."
             )
         if len(on_disk_coordinators) > 1:
             raise click.ClickException(
                 f"❌ Multiple coordinator profiles on disk: {listed} — a roster renders "
-                "exactly one 总管. Remove the extras or re-init with a coordinator "
-                "config declaring one, then retry."
+                "exactly one 总管. Remove the extras or re-run new-team with a "
+                "coordinator config declaring one, then retry."
             )
         on_disk_coordinator = on_disk_coordinators[0]
         roster_metadata_profiles.append(on_disk_coordinator["profile"])
@@ -740,8 +740,8 @@ def init_team(
                 "team's profile just as well as this team's role: skipping, its "
                 "SOUL/metadata are kept as-is\n"
                 "     To use this role key here: delete the profile first "
-                f"(rm -rf '{get_profiles_dir() / profile_name}'), or re-init it under "
-                "its owning team to record that prefix"
+                f"(rm -rf '{get_profiles_dir() / profile_name}'), or re-run new-team "
+                "under its owning team to record that prefix"
             )
             skipped_count += 1
             click.echo()
@@ -751,7 +751,7 @@ def init_team(
                 f"  ⏭️  Profile '{profile_name}' exists but its {TEAM_METADATA_FILENAME} is "
                 "unreadable — skipping, its SOUL/metadata are kept as-is (the file "
                 "may hide a removed/standalone marker)\n"
-                "     Fix or delete the profile, then re-run init"
+                "     Fix or delete the profile, then re-run new-team"
             )
             skipped_count += 1
             click.echo()
@@ -831,7 +831,7 @@ def init_team(
                     f"  ⚠️  {profile_name}: team/hub identity changed but its template is "
                     "not recoverable — its SOUL keeps the OLD roster lines (an old-hub "
                     "placeholder can never be auto-filled; verify will keep failing for "
-                    "it). Restore the recorded template and re-run init, or edit the "
+                    "it). Restore the recorded template and re-run new-team, or edit the "
                     "SOUL by hand."
                 )
                 continue

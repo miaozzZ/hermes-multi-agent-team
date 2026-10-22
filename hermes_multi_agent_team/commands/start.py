@@ -205,7 +205,7 @@ def start_team(prefix: str, dry_run: bool, standalone: bool = False) -> None:
 
     if not profiles:
         raise click.ClickException(
-            f"❌ No profiles found with prefix '{prefix}'. Run 'hermes-team init' first."
+            f"❌ No profiles found with prefix '{prefix}'. Run 'hermes-team new-team' first."
         )
 
     hermes_bin = find_hermes_bin()

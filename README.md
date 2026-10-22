@@ -24,7 +24,7 @@
 
 **用这个工具：**
 ```bash
-hermes-team init --team-name MyTeam --roles pm,fe,be,qa,ui
+hermes-team new-team --team-name MyTeam --roles pm,fe,be,qa,ui
 hermes-team configure --prefix MyTeam
 hermes-team start --prefix MyTeam
 # 飞书群里 @所有人 → 等 30 秒
@@ -38,7 +38,7 @@ hermes-team verify --prefix MyTeam
 
 ## 🎯 项目定位
 
-`hermes-multi-agent-team` 是一个 **独立 CLI 工具**：`hermes-team init / configure / start / ...` 直接运行，不依赖 Hermes Agent 运行时，适合脚本化、CI/CD 与手动精细控制。
+`hermes-multi-agent-team` 是一个 **独立 CLI 工具**：`hermes-team new-team / configure / start / ...` 直接运行，不依赖 Hermes Agent 运行时，适合脚本化、CI/CD 与手动精细控制。
 
 ---
 
@@ -158,7 +158,7 @@ hermes --version
 ### Step 2: 初始化团队
 
 ```bash
-hermes-team init --team-name MyTeam --roles pm,fe,be,qa,ui
+hermes-team new-team --team-name MyTeam --roles pm,fe,be,qa,ui
 ```
 
 这会：
@@ -205,12 +205,12 @@ hermes-team verify --prefix MyTeam
 
 ## 📋 命令详解
 
-### `hermes-team init`
+### `hermes-team new-team`（原 init，init 仍为隐藏别名）
 
 创建 Hermes Profiles 并生成 SOUL.md 模板。
 
 ```bash
-hermes-team init [OPTIONS]
+hermes-team new-team [OPTIONS]
 
 Options:
   --team-name TEXT    团队名称（命令行或 --config 文件二选一提供）
@@ -224,22 +224,22 @@ Options:
 **示例：**
 ```bash
 # 使用默认 5 个角色
-hermes-team init --team-name BaGoet --prefix baoget
+hermes-team new-team --team-name BaGoet --prefix baoget
 
 # 只创建 PM 和前端
-hermes-team init --team-name MyTeam --roles pm,fe
+hermes-team new-team --team-name MyTeam --roles pm,fe
 
 # 从已有 profile 克隆模型配置
-hermes-team init --team-name MyTeam --clone-from my-base-profile
+hermes-team new-team --team-name MyTeam --clone-from my-base-profile
 
 # 使用自定义团队配置
-hermes-team init --config my-team.json
+hermes-team new-team --config my-team.json
 ```
 
 **重跑行为：**
 - 渲染名单 = 本次 `--roles` 选中的角色 ∪ 磁盘上仍活跃的团队成员（`add-member` 加入的成员、旧版无元数据 profile——后者按 profile 后缀识别）：子集重跑不会把未选中的成员从 SOUL 名单里挤掉，输出会提示 `Including N on-disk member(s) ...`；on-disk 成员与配置角色重名时报错（名字必须全局唯一，collect-ids 按名匹配）
 - 磁盘上残留的 coordinator profile（元数据 `coordinator=true`）按总管对待、优先于配置里的 render-only hub（与 add-member 的名单重建优先级一致），不会被当成普通成员渲染
-- `remove-member --keep-profile` 移除的成员不会被复活：重跑 init 跳过该 profile 并提示（被移除的 coordinator 同样宣告跳过，不再显示"将创建"）
+- `remove-member --keep-profile` 移除的成员不会被复活：重跑 new-team 跳过该 profile 并提示（被移除的 coordinator 同样宣告跳过，不再显示"将创建"）
 
 ### `hermes-team configure`
 
@@ -372,20 +372,30 @@ Options:
 **适用场景**：签到、播报、查询这类单职责 bot。它们与团队的差别：
 
 - SOUL 是无名单的简洁模板（没有【飞书@方式】、没有协作规则）；`verify` 对它跳过 open_id 检查
-- 元数据标记 `standalone: true`：`collect-ids`、团队增减成员、`init` 重跑的成员并集扫描都会**自动忽略**它（即使它与某团队共享前缀）；`destroy` 也**不会**删除共享前缀的 standalone bot
+- 元数据标记 `standalone: true`：`collect-ids`、团队增减成员、`new-team` 重跑的成员并集扫描都会**自动忽略**它（即使它与某团队共享前缀）；`destroy` 也**不会**删除共享前缀的 standalone bot
 - 配置/凭证与其他 profile 一致：`configure --prefix NAME`（要自己的飞书 App），`start` 的查重同样覆盖它
 - 单功能 bot 通常希望**只被 @ 时响应**：`configure` 时把 `REQUIRE_MENTION` 保持默认 `true`（与团队成员相反；团队+bot 共享前缀的混合 configure 中，该键会为 bot 单独再问一次，默认仍为 `true`）
 - 不进群的用法（cron/CLI）：建好后直接 `hermes -p NAME chat` 或挂 cron，无需任何飞书配置
 
+### `hermes-team list`
+
+列出本机所有团队与独立 bot 的总览。
+
+```bash
+hermes-team list
+```
+
+输出分节如下（各节仅在有对应内容时显示）：🏠 Teams（按 prefix 分组，含成员数与成员列表，已离队成员不计入）、🗑️ removed（`remove-member --keep-profile` 保留的离队成员，按原团队分组、标 `(removed, kept)`）、🗂️ Legacy / unclassified（无元数据或元数据未记录 prefix 的老 profile，按名字分组）、🤖 Standalone bots（new-bot 创建的独立 agent，附功能描述）、⚠️ 元数据不可读的 profile。适合回答"这台机器上现在跑着什么"。
+
 ### `hermes-team new-config`
 
-交互式向导，生成团队配置 JSON（配合 `init --config` 使用）。
+交互式向导，生成团队配置 JSON（配合 `new-team --config` 使用）。
 
 ```bash
 hermes-team new-config [OUTPUT_PATH]
 ```
 
-流程：团队名称 → 前缀（路径安全校验）→ 总管安排三选一（独立 profile / 主 profile 担任 render-only / 无）→ 角色名单（从内置 5 角色逐个取舍，再添加自定义角色；与已选角色 key/名称冲突的内置角色自动跳过）→ 预览并写出。key/名称非法或重复时立即重问该项（其余错误重填该角色）；写出前先用与 `init --config` 相同的加载器在临时文件上回环验证，通过后才原子替换目标文件。
+流程：团队名称 → 前缀（路径安全校验）→ 总管安排三选一（独立 profile / 主 profile 担任 render-only / 无）→ 角色名单（从内置 5 角色逐个取舍，再添加自定义角色；与已选角色 key/名称冲突的内置角色自动跳过）→ 预览并写出。key/名称非法或重复时立即重问该项（其余错误重填该角色）；写出前先用与 `new-team --config` 相同的加载器在临时文件上回环验证，通过后才原子替换目标文件。
 
 ### `hermes-team verify`
 
@@ -520,23 +530,23 @@ Options:
 ```
 
 ```bash
-hermes-team init --config my-team.json
+hermes-team new-team --config my-team.json
 ```
 
 字段说明：
 - `team_name` / `prefix`：可选默认值，命令行参数优先
 - `roles`：每个角色需要 `key`（进入 profile 名 `<prefix>-<key>`，限字母/数字/`-`/`_`）、`name`（SOUL 与 collect-ids 回填 open_id 的匹配名，**必须全局唯一**）、`role`（职位）；`nickname` 缺省等于 `name`
-- `coordinator`：可选。声明后 init 会**一并创建总管 profile** 并渲染总管 SOUL（不声明则沿用旧行为：不建总管 profile，总管由你的主 profile 担任）
+- `coordinator`：可选。声明后 new-team 会**一并创建总管 profile** 并渲染总管 SOUL（不声明则沿用旧行为：不建总管 profile，总管由你的主 profile 担任）
 - `coordinator_fallback`：可选，与 `coordinator` **互斥**（两者同时声明会在加载时报错）。声明一个 **render-only 总管条目**（`name` 必填；`role` 缺省 `总管`，`nickname` 缺省 `name`）：只进入 `team_members` 供成员 @（内置模板要求「只 @总管 汇报」），不建 profile（其占位符 open_id 与普通成员一样，collect-ids **观测到该名字时自动回填**；未观测到时与主人行一样豁免缺口统计，verify 不因此失败）；名称须与角色名互异。内置默认团队自带的这一条目为 `M总`
 - `template`：自定义角色必须指定。可以是相对 config 文件的**模板文件路径**（完全自定义人设；只相对 config 所在目录解析，不回退当前目录），也可以复用内置模板的短名（`pm`/`frontend`/`backend`/`qa`/`designer`/`coordinator`/`bot`——`bot` 为无【飞书@方式】的简洁模板，团队渲染时以 `role` 文本充当 `description`、身份句自称该团队的单职责成员，`verify` 对它跳过 open_id 检查）；内置 5 角色（pm/fe/be/qa/ui）不写则用默认模板
 
-init 会在每个 profile 里写入 `.hermes-team.json` 元数据，`collect-ids` 据此适配自定义角色名（**声明 coordinator 时**总管的 open_id 也自动回填），旧团队（无元数据）自动回退到内置角色表；`verify` 对占位符 open_id 的识别按 `ou_xxx` 前缀、天然适配任意角色名，它只读元数据的 standalone 标记与模板名（standalone bot 与 roster-free `bot` 模板成员跳过 open_id 名单检查）。注意：**声明了 `coordinator_fallback` 的团队（以及内置默认团队）**才有 render-only 总管占位（无 profile/元数据），其 open_id 会在 collect-ids **观测到时自动回填**（群历史/日志提及即填；未观测到的占位符豁免缺口统计，需要时也可手动填写）；两者都未声明的自定义团队 roster 中没有任何总管条目。
+new-team 会在每个 profile 里写入 `.hermes-team.json` 元数据，`collect-ids` 据此适配自定义角色名（**声明 coordinator 时**总管的 open_id 也自动回填），旧团队（无元数据）自动回退到内置角色表；`verify` 对占位符 open_id 的识别按 `ou_xxx` 前缀、天然适配任意角色名，它只读元数据的 standalone 标记与模板名（standalone bot 与 roster-free `bot` 模板成员跳过 open_id 名单检查）。注意：**声明了 `coordinator_fallback` 的团队（以及内置默认团队）**才有 render-only 总管占位（无 profile/元数据），其 open_id 会在 collect-ids **观测到时自动回填**（群历史/日志提及即填；未观测到的占位符豁免缺口统计，需要时也可手动填写）；两者都未声明的自定义团队 roster 中没有任何总管条目。
 
 自定义 SOUL 模板是 Jinja2，可用变量：
 - `{{ name }}` / `{{ nickname }}` / `{{ role }}` — 本角色的显示名/小名/职位
 - `{{ description }}` — 一句话描述（roster-free `bot` 模板使用；团队渲染等于 `role` 文本，`new-bot` 为功能描述）
 - `{{ team_name }}` — 团队名称
-- `{{ team_members }}` — 团队成员列表（`name`/`nickname`/`role`/`open_id`），声明 coordinator 时总管排第一；不声明时若声明了 `coordinator_fallback`（或内置默认团队自带的 `M总`）则该 render-only 总管条目排第一，否则只含声明的角色（注意：内置模板要求成员「只 @总管 汇报」，建议声明 `coordinator` 或 `coordinator_fallback`，否则成员没有可 @ 的总管条目，init 也会给出警告）
+- `{{ team_members }}` — 团队成员列表（`name`/`nickname`/`role`/`open_id`），声明 coordinator 时总管排第一；不声明时若声明了 `coordinator_fallback`（或内置默认团队自带的 `M总`）则该 render-only 总管条目排第一，否则只含声明的角色（注意：内置模板要求成员「只 @总管 汇报」，建议声明 `coordinator` 或 `coordinator_fallback`，否则成员没有可 @ 的总管条目，new-team 也会给出警告）
 - `{{ owner_open_id }}` — 主人 open_id 占位
 
 > 提示：人设正文使用 `{% for member in team_members %}` 循环生成 `<at user_id="{{ member.open_id }}">...</at>` 标签，collect-ids 就能自动回填 open_id。回填只认 `<at>` 标签、**不要求固定的小节标题**——内置模板的 `【飞书@方式】` 小节即满足，自定义标题（如 `【飞书@格式】`）同样有效。

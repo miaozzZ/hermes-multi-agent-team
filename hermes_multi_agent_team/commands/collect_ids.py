@@ -178,7 +178,7 @@ def collect_team_ids(
     for name in list_name_ambiguous_profiles(prefix):
         click.echo(
             f"  ⚠️  {name}: name matches '{prefix}-…' but carries no recorded prefix — "
-            f"it may belong to team '{name.rsplit('-', 1)[0]}'; skipped. Re-init it "
+            f"it may belong to team '{name.rsplit('-', 1)[0]}'; skipped. Re-run new-team "
             "under its own team to record the prefix and remove the ambiguity."
         )
     # Profiles kept on disk via `remove-member --keep-profile` carry a
@@ -188,7 +188,7 @@ def collect_team_ids(
 
     if not profiles:
         raise click.ClickException(
-            f"❌ No profiles found with prefix '{prefix}'. Run 'hermes-team init' first."
+            f"❌ No profiles found with prefix '{prefix}'. Run 'hermes-team new-team' first."
         )
 
     click.echo(f"\n🔍 Collecting open_ids for {len(profiles)} profile(s)")

@@ -24,7 +24,7 @@
 
 **With this tool:**
 ```bash
-hermes-team init --team-name MyTeam --roles pm,fe,be,qa,ui
+hermes-team new-team --team-name MyTeam --roles pm,fe,be,qa,ui
 hermes-team configure --prefix MyTeam
 hermes-team start --prefix MyTeam
 hermes-team collect-ids --prefix MyTeam
@@ -153,7 +153,7 @@ Create a bot/app on your messaging platform for each role:
 ### Step 2: Initialize Team
 
 ```bash
-hermes-team init --team-name MyTeam --roles pm,fe,be,qa,ui
+hermes-team new-team --team-name MyTeam --roles pm,fe,be,qa,ui
 ```
 
 ### Step 3: Configure Credentials
@@ -193,7 +193,8 @@ hermes-team verify --prefix MyTeam
 
 | Command | Description |
 |---------|-------------|
-| `hermes-team init` | Create profiles + generate SOUL.md templates |
+| `hermes-team new-team` | Create profiles + generate SOUL.md templates |
+| `hermes-team list` | Inventory of all teams (by prefix) and standalone bots on this host |
 | `hermes-team new-config` | Interactive wizard that writes a team config JSON |
 | `hermes-team new-bot` | Create a standalone single-function agent (no team; served by the host gateway) |
 | `hermes-team configure` | Interactively configure .env for each profile |
@@ -229,18 +230,18 @@ Roles and names are externalized to a **team config JSON** — no code changes n
 }
 ```
 
-Then run `hermes-team init --config my-team.json`.
+Then run `hermes-team new-team --config my-team.json`.
 
 Field notes:
 - `team_name` / `prefix`: optional defaults; CLI flags win
 - `roles`: each needs `key` (part of the profile name `<prefix>-<key>`, letters/digits/`-`/`_`), `name` (matched by collect-ids when filling open_ids — **must be unique**) and `role` (job title); `nickname` defaults to `name`
-- `coordinator`: optional — when declared, init also **creates the coordinator's profile** and renders the coordinator SOUL (without it, keep using your main profile as the hub, as before)
+- `coordinator`: optional — when declared, new-team also **creates the coordinator's profile** and renders the coordinator SOUL (without it, keep using your main profile as the hub, as before)
 - `coordinator_fallback`: optional and **mutually exclusive** with `coordinator` (declaring both is a load-time error). Declares a **render-only hub entry** (`name` required; `role` defaults to 总管, `nickname` to `name`): it only joins `team_members` so members have a hub to @ (bundled templates say "report to the hub only") — no profile is created; its placeholder open_id auto-fills like any member's once collect-ids observes the name (an unobserved placeholder is exempt from the gap count, like the owner line); its name must differ from every role name. The builtin default team ships one named `M总`
 - `template`: required for custom keys — either a file path relative to the config file's directory (fully custom persona; resolved against the config directory only, never the cwd) or a builtin short name (`pm`/`frontend`/`backend`/`qa`/`designer`/`coordinator`/`bot` — `bot` is the roster-free template with no 【飞书@方式】 section; in a team render its `description` slot is the member's role text and its identity line calls it a single-duty member of that team; `verify` skips its open_id check); the builtin five roles default to their bundled templates
 
-`init` writes a `.hermes-team.json` metadata file into every profile; `collect-ids` uses it to adapt to custom role names (the coordinator's open_id is auto-filled too, **when a coordinator is declared**), and legacy teams without metadata fall back to the builtin role table. `verify` reads only the metadata's standalone marker and template name (standalone bots and roster-free `bot`-template members skip the open_id roster check — "no roster expected"); its placeholder detection itself is prefix-based (`ou_xxx`), so it works with any role names. Note: only teams that declare `coordinator_fallback` (and the builtin default team) carry a render-only hub placeholder (no profile/metadata) — its open_id auto-fills once collect-ids observes the name (group history / log mentions); an unobserved placeholder is exempt from the gap count, and you can always set it by hand. A custom config declaring neither has no hub entry in the roster at all.
+`new-team` writes a `.hermes-team.json` metadata file into every profile; `collect-ids` uses it to adapt to custom role names (the coordinator's open_id is auto-filled too, **when a coordinator is declared**), and legacy teams without metadata fall back to the builtin role table. `verify` reads only the metadata's standalone marker and template name (standalone bots and roster-free `bot`-template members skip the open_id roster check — "no roster expected"); its placeholder detection itself is prefix-based (`ou_xxx`), so it works with any role names. Note: only teams that declare `coordinator_fallback` (and the builtin default team) carry a render-only hub placeholder (no profile/metadata) — its open_id auto-fills once collect-ids observes the name (group history / log mentions); an unobserved placeholder is exempt from the gap count, and you can always set it by hand. A custom config declaring neither has no hub entry in the roster at all.
 
-Custom SOUL templates are Jinja2 with: `{{ name }}` / `{{ nickname }}` / `{{ role }}`, `{{ description }}` (one-line description — used by the roster-free `bot` template; equals the role text in team renders, the function description for `new-bot`), `{{ team_name }}`, `{{ team_members }}` and `{{ owner_open_id }}`. `team_members` entries carry `name`/`nickname`/`role`/`open_id`, with the declared coordinator first; without one, a `coordinator_fallback` entry (or the builtin default team's legacy `M总`) leads the roster — otherwise custom configs list exactly their declared roles (note: bundled templates tell members to report to the hub only, so declare `coordinator` or `coordinator_fallback` unless you use fully custom templates — init warns about a missing hub). Render the roster with a `{% for member in team_members %}` loop of `<at user_id="{{ member.open_id }}">…</at>` tags so collect-ids can fill the ids — filling matches `<at>` tags only and does **not** require a fixed section heading (the bundled templates' `【飞书@方式】` section satisfies it; a custom heading like `【飞书@格式】` works equally well). Bundled templates live in `hermes_multi_agent_team/templates/SOUL/` (coordinator/pm/frontend/backend/qa/designer/bot) — copy one to start from.
+Custom SOUL templates are Jinja2 with: `{{ name }}` / `{{ nickname }}` / `{{ role }}`, `{{ description }}` (one-line description — used by the roster-free `bot` template; equals the role text in team renders, the function description for `new-bot`), `{{ team_name }}`, `{{ team_members }}` and `{{ owner_open_id }}`. `team_members` entries carry `name`/`nickname`/`role`/`open_id`, with the declared coordinator first; without one, a `coordinator_fallback` entry (or the builtin default team's legacy `M总`) leads the roster — otherwise custom configs list exactly their declared roles (note: bundled templates tell members to report to the hub only, so declare `coordinator` or `coordinator_fallback` unless you use fully custom templates — new-team warns about a missing hub). Render the roster with a `{% for member in team_members %}` loop of `<at user_id="{{ member.open_id }}">…</at>` tags so collect-ids can fill the ids — filling matches `<at>` tags only and does **not** require a fixed section heading (the bundled templates' `【飞书@方式】` section satisfies it; a custom heading like `【飞书@格式】` works equally well). Bundled templates live in `hermes_multi_agent_team/templates/SOUL/` (coordinator/pm/frontend/backend/qa/designer/bot) — copy one to start from.
 
 ---
 

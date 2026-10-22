@@ -20,18 +20,19 @@ def test_cli_version():
     runner = CliRunner()
     result = runner.invoke(cli, ["--version"])
     assert result.exit_code == 0
-    assert "0.9.0" in result.output
+    assert "0.10.0" in result.output
 
 
 def test_cli_lists_all_commands():
-    """CLI help should list all 12 commands."""
+    """CLI help should list all 13 commands."""
     runner = CliRunner()
     result = runner.invoke(cli, ["--help"])
     for cmd in [
-        "init",
+        "new-team",
         "configure",
         "start",
         "collect-ids",
+        "list",
         "new-config",
         "new-bot",
         "add-member",
@@ -42,6 +43,29 @@ def test_cli_lists_all_commands():
         "destroy",
     ]:
         assert cmd in result.output, f"Command '{cmd}' not found in help output"
+
+
+def test_cli_help_hides_init_alias():
+    """The init → new-team rename must not resurface anywhere in --help: the
+    alias is registered hidden, and no command description should still tell
+    users to run the retired name.
+
+    The group-level --help TRUNCATES long command descriptions (a "then run
+    init --config" tail would show as "…(then run..."), so each command's own
+    --help is checked too — that is where a full docstring becomes visible.
+    """
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--help"])
+    assert result.exit_code == 0
+    assert cli.commands["init"].hidden
+    assert "init" not in result.output
+
+    for name, command in cli.commands.items():
+        if getattr(command, "hidden", False):
+            continue
+        sub = runner.invoke(cli, [name, "--help"])
+        assert sub.exit_code == 0, name
+        assert "init" not in sub.output, f"{name} --help mentions the retired alias"
 
 
 def test_cli_rejects_empty_prefix_on_every_command(tmp_hermes_home):

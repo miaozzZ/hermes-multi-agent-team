@@ -3,7 +3,7 @@
 Asks for the team name, prefix, the hub arrangement (dedicated coordinator
 profile / render-only hub on the main profile / none) and the role roster
 (optionally starting from the builtin five), validating every answer as it
-is given (via the same validators ``init --config`` uses) so the written
+is given (via the same validators ``new-team --config`` uses) so the written
 file loads on the first try.
 """
 
@@ -106,7 +106,7 @@ def _spec_to_config_entry(spec, omit_default_template: bool = True) -> dict:
 
 def _ask_hub_mode() -> str:
     click.echo("\n🧠 总管（Hub）安排——团队的中枢：")
-    click.echo("  1) 独立总管 profile  — init 会创建它的 profile 并渲染总管 SOUL（推荐）")
+    click.echo("  1) 独立总管 profile  — new-team 会创建它的 profile 并渲染总管 SOUL（推荐）")
     click.echo("  2) 由主 profile 担任 — 只在成员 SOUL 里保留一个可 @ 的总管条目（render-only）")
     click.echo("  3) 不要总管          — 仅适合全员自定义模板（内置模板要求成员 @总管）")
     while True:
@@ -287,6 +287,6 @@ def run_wizard(output_path: str | None) -> None:
     click.echo("\n📋 下一步：")
     # Quote for copy-paste: prefix/path may contain spaces (validate_prefix
     # allows them), which the shell would otherwise split into arguments.
-    click.echo(f"   hermes-team init --config {shlex.quote(str(path))}")
+    click.echo(f"   hermes-team new-team --config {shlex.quote(str(path))}")
     click.echo(f"   hermes-team configure --prefix {shlex.quote(prefix)}")
     click.echo(f"   hermes-team start --prefix {shlex.quote(prefix)}")

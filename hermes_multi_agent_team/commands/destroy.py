@@ -25,7 +25,7 @@ def destroy_team(prefix: str, force: bool) -> None:
     for name in list_name_ambiguous_profiles(prefix):
         click.echo(
             f"   ⚠️  {name}: name matches '{prefix}-…' but carries no recorded prefix — "
-            f"it may belong to team '{name.rsplit('-', 1)[0]}'; NOT deleted. Re-init it "
+            f"it may belong to team '{name.rsplit('-', 1)[0]}'; NOT deleted. Re-run new-team "
             "under its own team to record the prefix and remove the ambiguity."
         )
 

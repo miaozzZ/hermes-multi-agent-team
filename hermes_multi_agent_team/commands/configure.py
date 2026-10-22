@@ -38,6 +38,7 @@ class EnvField:
     secret: bool = False
     choices: tuple[str, ...] | None = None
     confirm: bool = False
+    help: str = ""
 
 
 # Credential fields are prompted per profile (each agent needs its own Feishu app);
@@ -55,6 +56,8 @@ _REQUIRE_MENTION_FIELD = EnvField(
     "Require @mention",
     "false",
     confirm=True,
+    help="群里是否只响应 @本bot 的消息：No=响应所有群消息（团队成员推荐——文字消息里的"
+    "@不是真@，点名制会漏听队友）；Yes=点名制，只响应被@（省 token，单功能 bot 推荐）。",
 )
 
 SETTINGS_FIELDS = (
@@ -63,12 +66,14 @@ SETTINGS_FIELDS = (
         "Feishu Domain",
         "feishu",
         choices=("feishu", "lark"),
+        help="服务域名：feishu=国内飞书，lark=国际版 Lark。选错会连不上。",
     ),
     EnvField(
         "FEISHU_CONNECTION_MODE",
         "Connection Mode",
         "websocket",
         choices=("websocket", "webhook"),
+        help="websocket=长连接（无需公网服务器，推荐）；webhook=回调地址（需公网可达的服务器）。",
     ),
     # Hermes defaults FEISHU_GROUP_POLICY to "allowlist", and an empty allowlist
     # rejects every group message — team group chats need "open" to hear anyone.
@@ -77,6 +82,8 @@ SETTINGS_FIELDS = (
         "Group Policy",
         "open",
         choices=("open", "allowlist", "disabled"),
+        help="群消息准入：open=所有群都响应（团队协作推荐）；allowlist=只响应白名单成员"
+        "（名单在下一步，留空会拒收所有群消息）；disabled=完全忽略群消息。",
     ),
     # "all" (not Hermes' default "none") because teammates are bots, and bot @s in
     # plain text are not real mentions, so "mentions" would not catch them either.
@@ -85,6 +92,8 @@ SETTINGS_FIELDS = (
         "Allow Bots",
         "all",
         choices=("none", "mentions", "all"),
+        help="是否接收其他机器人的消息。团队成员互相是 bot，团队协作必须 all；"
+        "单功能 bot 不需要收 bot 消息，可改 none 省事。",
     ),
     _REQUIRE_MENTION_FIELD,
 )
@@ -96,15 +105,26 @@ SETTINGS_FIELDS = (
 PER_PROFILE_SETTINGS_FIELDS = (
     EnvField(
         "FEISHU_ALLOWED_USERS",
-        "Allowed Users (comma-separated open_ids for THIS app; under group policy "
-        "'allowlist' an empty list rejects ALL group messages)",
+        "Allowed Users",
         "",
+        help="用户白名单（填 open_id，逗号分隔——注意每个 App 下的 open_id 不同）。open_id "
+        "从哪里来：团队成员可跑 collect-ids 后从回填的 SOUL.md 里 "
+        '<at user_id="ou_…"> 标签复制（@主人 行亦然；collect-ids 判不出主人时该行仍是占位符）；'
+        "standalone bot 与 roster-free 成员没有 <at> 标签、collect-ids 会跳过——改从该 "
+        "profile 日志的 Inbound sender 行取 open_id。首次配置可先留空，"
+        "configure/start/collect-ids 跑通后再回来补填。该名单决定两件事："
+        "① Group Policy=allowlist 时的群消息准入；② 私聊/配对准入——"
+        "pairing approve 之后仍要把对方 open_id 填进来，否则 DM 也会被拒"
+        "（唯 FEISHU_ALLOW_ALL_USERS=true 的老配置例外，私聊放行）。留空 = 群消息在 allowlist 模式下"
+        "全拒、私聊全拒（通常应该用 Group Policy=open，并至少填上主人的 open_id，而不是留空名单）。",
     ),
 )
 
 
 def _prompt_field(field: EnvField, current: str) -> str:
     """Prompt for one field, using click validation for choice/confirm fields."""
+    if field.help:
+        click.echo(click.style(f"    ℹ️  {field.help}", dim=True))
     label = f"    {field.prompt} ({field.key})"
     if field.confirm:
         value = click.confirm(label, default=current.lower() == "true")
@@ -284,6 +304,13 @@ def _prompt_unique_app_id(
     otherwise bypass the duplicate check (and never match at connect time).
     """
     while True:
+        click.echo(
+            click.style(
+                "    ℹ️  飞书应用 ID（形如 cli_xxx）。获取：飞书开放平台 → 你的应用 → 凭证与基础信息。"
+                "每个 agent 必须用不同的 App。",
+                dim=True,
+            )
+        )
         app_id = str(
             click.prompt(
                 f"    Feishu App ID for {profile_name}",
@@ -318,6 +345,12 @@ def _prompt_app_secret(profile_name: str, existing: dict[str, str | None]) -> st
     """
     default = existing.get(APP_SECRET_KEY) or ""
     label = f"    Feishu App Secret for {profile_name}"
+    click.echo(
+        click.style(
+            "    ℹ️  飞书应用密钥（与 App ID 同一页面）。输入时会显示 *；直接回车 = 保留已保存的密钥。",
+            dim=True,
+        )
+    )
     while True:
         if sys.stdin.isatty():
             click.echo(f"{label}: ", nl=False)
@@ -349,7 +382,7 @@ def configure_team(prefix: str, dry_run: bool) -> None:
 
     if not profiles:
         raise click.ClickException(
-            f"❌ No profiles found with prefix '{prefix}'. Run 'hermes-team init' first."
+            f"❌ No profiles found with prefix '{prefix}'. Run 'hermes-team new-team' first."
         )
 
     click.echo(f"\n⚙️  Configuring {len(profiles)} profile(s) with prefix '{prefix}'")
@@ -369,6 +402,13 @@ def configure_team(prefix: str, dry_run: bool) -> None:
     if dry_run:
         click.echo("   📋 DRY RUN — no changes will be made")
 
+    click.echo(
+        click.style(
+            "   ℹ️  平台设置指域名/连接方式/群策略这类行为开关——同一团队通常一致；"
+            "每个 agent 的飞书 App 凭证无论怎么选都是各自独立的。",
+            dim=True,
+        )
+    )
     share_settings = click.confirm(
         "\n💡 Use the same platform settings (domain/mode/policies) for all profiles?",
         default=True,
@@ -416,6 +456,11 @@ def configure_team(prefix: str, dry_run: bool) -> None:
                 # with its own default (true), keeping any value already in
                 # its .env.
                 current = existing.get("FEISHU_REQUIRE_MENTION") or "true"
+                # Same one-line explanation every other prompt gets — the
+                # shared-settings pass already showed it with the TEAM's
+                # default; this re-ask flips the default for a bot, so say so.
+                if _REQUIRE_MENTION_FIELD.help:
+                    click.echo(click.style(f"    ℹ️  {_REQUIRE_MENTION_FIELD.help}", dim=True))
                 value = click.confirm(
                     f"    Require @mention for standalone bot {profile_name} "
                     f"({_REQUIRE_MENTION_FIELD.key})",

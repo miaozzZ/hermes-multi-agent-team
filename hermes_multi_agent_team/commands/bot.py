@@ -77,7 +77,10 @@ def new_bot(
     # contexts (CI) and surprise interactive users who only wanted a preview.
     # A placeholder keeps the spec buildable; the real run prompts as usual.
     if not description and not dry_run:
-        description = click.prompt(f"  {display_name} 的功能描述（一句话，如：签到打卡机器人）")
+        click.echo(
+            click.style("  ℹ️  用一句话说清它只做什么（会写进 SOUL 成为它的唯一职责）", dim=True)
+        )
+        description = click.prompt(f"  {display_name} 的功能描述")
     description = (description or "").strip()
     if not description:
         if dry_run:

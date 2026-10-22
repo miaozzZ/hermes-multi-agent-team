@@ -46,7 +46,7 @@ def team_status(prefix: str) -> None:
 
     if not profiles:
         raise click.ClickException(
-            f"❌ No profiles found with prefix '{prefix}'. Run 'hermes-team init' first."
+            f"❌ No profiles found with prefix '{prefix}'. Run 'hermes-team new-team' first."
         )
 
     click.echo(f"\n📊 Team Status — prefix: '{prefix}'")

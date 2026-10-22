@@ -137,7 +137,7 @@ roles = [
 ]
 ```
 
-也可以完全不改代码：写一个团队 JSON 配置，用 `hermes-team init --config my-team.json` 引用你的模板文件（路径相对 config），详见 README「自定义角色」。
+也可以完全不改代码：写一个团队 JSON 配置，用 `hermes-team new-team --config my-team.json` 引用你的模板文件（路径相对 config），详见 README「自定义角色」。
 
 ### Step 3: 提交 PR
 
@@ -178,7 +178,9 @@ pytest tests/ -v --cov=hermes_multi_agent_team
 def test_my_feature(tmp_hermes_home, mock_subprocess_success):
     """测试用例必须使用 fixtures 隔离环境。"""
     runner = CliRunner()
-    result = runner.invoke(cli, ["init", "--team-name", "Test", "--roles", "pm", "--prefix", "t"])
+    result = runner.invoke(
+        cli, ["new-team", "--team-name", "Test", "--roles", "pm", "--prefix", "t"]
+    )
     assert result.exit_code == 0
 ```
 

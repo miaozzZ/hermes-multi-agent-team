@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.10.0] - 2026-10-22
+
+### 🔤 init 更名 new-team（与 new-bot/new-config 对称）
+
+- `hermes-team init` → **`hermes-team new-team`**，创建类命令命名统一（new-team / new-config / new-bot / add-member）
+- `init` 保留为**隐藏别名**（不出现在帮助里但可用），肌肉记忆与旧脚本不受影响
+
+### 📋 list 命令 + 全命令自解释化（"用时不用查资料"）
+
+- ➕ `hermes-team list`：本机总览——团队按 prefix 分组（成员数/成员列表，不含已离队成员）、removed 保留项（独立一节，按原团队分组、标 `(removed, kept)`）、Legacy/无元数据项（按名字分组）、Standalone bots（附功能描述）、元数据不可读项；附网关可见计数
+- 📖 `configure` 每个提问项前增加一行说明：域名的国内/国际之分、长连接 vs 回调、群策略三个取值的含义与坑（allowlist 空名单拒收所有群消息）、Allow Bots 为何团队必须 all、点名制 vs 自由模式的取舍（token）、白名单 open_id 按 App 不同及获取方式；App ID/Secret 提示获取路径与回车保留语义；共享设置确认前的解释
+- 📖 `verify` 检查项改双语标签（保留机器 key + 中文含义）；`doctor` 每项检查附中文说明；`new-bot` 功能描述提问附提示
+
 ## [0.9.0] - 2026-10-22
 
 ### 🔍 collect-ids 重写：点名制团队可用 + 命名空间正确性修复（破坏性）
