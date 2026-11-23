@@ -366,6 +366,79 @@ def is_standalone_profile(name: str) -> bool:
     return bool(read_team_metadata(name).get("standalone"))
 
 
+def read_model_config(name: str) -> tuple[str | None, str | None]:
+    """Best-effort ``(model, provider)`` from a profile's config.yaml, for display.
+
+    Line-level scan (no YAML dependency), same idiom as
+    ``_config_gateway_standalone``: Hermes stores the model under the
+    top-level ``model:`` section's direct-child ``default`` key (``model`` works
+    as an alias) and the provider under the top-level ``provider:`` key, plus an
+    inline ``model: {default: ...}`` form. Missing provider means Hermes'
+    ``auto`` (credential auto-detect). Unreadable or unset yields ``(None,
+    None)`` — a caller building a host inventory must not crash on one broken
+    profile.
+    """
+    path = get_profile_dir(name) / "config.yaml"
+    if not path.exists():
+        return None, None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return None, None
+
+    model: str | None = None
+    provider: str | None = None
+    child_indent: int | None = None
+    in_model = False
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        if not line or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent == 0:
+            key, sep, value = line.partition(":")
+            if not sep:
+                in_model = False
+                continue
+            key = key.strip()
+            value = value.strip()
+            in_model = key == "model"
+            child_indent = None
+            if key == "provider":
+                provider = _yaml_scalar(value) or None
+            elif in_model and value.startswith("{"):
+                match = re.search(r"\b(?:default|model)\s*:\s*([^,}]+)", value)
+                model = _yaml_scalar(match.group(1)) if match else None
+            continue
+        if not in_model:
+            continue
+        if child_indent is None:
+            child_indent = indent  # first nested key defines the direct-child indent
+        if indent == child_indent:
+            key, sep, value = line.strip().partition(":")
+            if sep and key.strip() in ("default", "model") and model is None:
+                # No break: provider is a top-level key that may follow, keep scanning.
+                model = _yaml_scalar(value) or None
+    return model, provider
+
+
+def _yaml_scalar(value: str) -> str:
+    """Scalar of a YAML value: strip inline comment and quotes, keep case.
+
+    ``_scalar_token`` lowercases because its callers test truthiness; model
+    names are displayed verbatim, so an upper-cased custom model id would
+    render wrong there.
+    """
+    value = value.strip()
+    if value[:1] in ('"', "'"):
+        quote = value[0]
+        end = value.find(quote, 1)
+        if end == -1:
+            return ""
+        return value[1:end].strip()
+    return value.split("#", 1)[0].strip()
+
+
 def _config_gateway_standalone(profile_dir: Path) -> bool:
     """Best-effort read of ``gateway.standalone`` from a profile's config.yaml.
 

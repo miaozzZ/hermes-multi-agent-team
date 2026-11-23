@@ -2,6 +2,7 @@
 
 from click.testing import CliRunner
 
+from hermes_multi_agent_team import __version__
 from hermes_multi_agent_team.cli import cli
 
 
@@ -20,7 +21,7 @@ def test_cli_version():
     runner = CliRunner()
     result = runner.invoke(cli, ["--version"])
     assert result.exit_code == 0
-    assert "0.10.0" in result.output
+    assert __version__ in result.output
 
 
 def test_cli_lists_all_commands():

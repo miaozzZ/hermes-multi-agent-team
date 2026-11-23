@@ -379,13 +379,33 @@ Options:
 
 ### `hermes-team list`
 
-列出本机所有团队与独立 bot 的总览。
+列出本机所有团队与独立 bot 的完整清单。
 
 ```bash
 hermes-team list
 ```
 
-输出分节如下（各节仅在有对应内容时显示）：🏠 Teams（按 prefix 分组，含成员数与成员列表，已离队成员不计入）、🗑️ removed（`remove-member --keep-profile` 保留的离队成员，按原团队分组、标 `(removed, kept)`）、🗂️ Legacy / unclassified（无元数据或元数据未记录 prefix 的老 profile，按名字分组）、🤖 Standalone bots（new-bot 创建的独立 agent，附功能描述）、⚠️ 元数据不可读的 profile。适合回答"这台机器上现在跑着什么"。
+```
+📋 7 profile(s) on this host (7 gateway-visible)
+
+🏠 Teams
+   whisage  (5 profile(s))
+     Profile              Model                  GW Feishu App ID         Last Active
+     ────────────────────────────────────────────────────────────────────────────────
+     whisage-coord        glm-5.4                🟢  ✅      cli_aa****9bf4 2026-11-23 23:06:00
+     whisage-full         glm-5.4                🟢  ✅      cli_aa****9bb4 2026-11-23 23:06:01
+     ...
+
+🤖 Standalone bots (new-bot)
+     Profile              Model                  GW Feishu App ID         Last Active
+     ────────────────────────────────────────────────────────────────────────────────
+     finance-assistant    glm-5.3-flash          🟢  ✅      cli_aa****9c14 2026-11-23 23:05:59
+       └ 处理公司各项财务工作
+```
+
+每节内每个 profile 一行，各列含义：**Model**（profile `config.yaml` 的 `model.default`，provider 显式指定且非 `auto` 时以 `(provider)` 附注，未配置显示 `<unset>`）、**GW**（🟢 网关可见 / ⚫ 不可见）、**Feishu**（✅ 已连接 / ❌ 未连接）、**App ID**（中间打码）、**Last Active**（该 profile 日志里的最近活动时间）。
+
+输出分节如下（各节仅在有对应内容时显示）：🏠 Teams（按 prefix 分组，含成员数，已离队成员不计入）、🗑️ removed（`remove-member --keep-profile` 保留的离队成员，按原团队分组、标 `(removed, kept)`）、🗂️ Legacy / unclassified（无元数据或元数据未记录 prefix 的老 profile，按名字分组）、🤖 Standalone bots（new-bot 创建的独立 agent，功能描述以 `└` 子行附在行下）、⚠️ 元数据不可读的 profile。总览级信息一眼齐全，不必再按 prefix 逐个跑 `status`。
 
 ### `hermes-team new-config`
 

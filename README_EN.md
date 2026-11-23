@@ -194,7 +194,7 @@ hermes-team verify --prefix MyTeam
 | Command | Description |
 |---------|-------------|
 | `hermes-team new-team` | Create profiles + generate SOUL.md templates |
-| `hermes-team list` | Inventory of all teams (by prefix) and standalone bots on this host |
+| `hermes-team list` | Full inventory of all teams (by prefix) and standalone bots — per-profile model, gateway/Feishu state, masked App ID, last activity |
 | `hermes-team new-config` | Interactive wizard that writes a team config JSON |
 | `hermes-team new-bot` | Create a standalone single-function agent (no team; served by the host gateway) |
 | `hermes-team configure` | Interactively configure .env for each profile |

@@ -291,7 +291,11 @@ def verify(prefix: str) -> None:
 
 @cli.command("list")
 def list_all() -> None:
-    """📋 List every team (by prefix) and standalone bot on this host."""
+    """📋 List every team (by prefix) and standalone bot on this host.
+
+    Each profile shows model, gateway/Feishu state, masked App ID and last
+    activity — no per-team `status --prefix` round-trip needed.
+    """
     from hermes_multi_agent_team.commands.listing import run_list
 
     run_list()

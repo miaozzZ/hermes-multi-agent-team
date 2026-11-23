@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.11.0] - 2026-11-23
+
+### 📋 list 直出全部 profile 详情（模型/网关/飞书/App ID/最近活跃）
+
+- `hermes-team list` 从"只有名字的摘要"升级为**完整清单**：各节内每个 profile 一行，显示 Model、GW（网关可见性）、Feishu（连接状态）、打码 App ID、Last Active（最近日志活动时间），不必再按 prefix 逐个跑 `status`
+- Model 列读自 profile `config.yaml` 的 `model.default`；provider 显式指定且非 `auto` 时以 `(provider)` 附注，未配置显示 `<unset>`
+- 新增 `read_model_config()`：无 YAML 依赖的行级扫描（与 `_config_gateway_standalone` 同风格），支持 `model.default` / `model.model` 别名与行内 `model: {default: ...}` 形式；单个 profile 的 config.yaml 不可读不影响整表
+- standalone bot 的功能描述改为行下 `└` 子行；移除尾部"Per-team status"提示（详情已内联）
+
 ## [0.10.0] - 2026-10-22
 
 ### 🔤 init 更名 new-team（与 new-bot/new-config 对称）
